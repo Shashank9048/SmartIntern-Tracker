@@ -1,0 +1,196 @@
+from beanie import Document
+from pydantic import BaseModel, EmailStr
+from datetime import datetime
+from typing import Optional, List, Literal
+
+class DashboardInsightCache(BaseModel):
+    last_updated: datetime = datetime.now()
+    trends: str
+    improvement_strategy: str
+    follow_up_suggestions: List[str]
+    learning_roadmap: str
+
+# --- AUTH MODELS ---
+class User(Document):
+    email: str
+    password_hash: str
+    full_name: str
+    branch: str = ""
+    graduation_year: str = ""
+    skills: List[str] = []
+    resume_text: Optional[str] = None
+    uploaded_file_url: Optional[str] = None
+    profile_picture: Optional[str] = None
+    preferences: dict = {"theme": "system", "notifications": {"email": True, "interview": True, "marketing": False}}
+    dashboard_insights: Optional[DashboardInsightCache] = None
+    created_at: datetime = datetime.now()
+
+    class Settings:
+        name = "users"
+
+class UserSignup(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    branch: Optional[str] = ""
+    graduation_year: Optional[str] = ""
+    skills: List[str] = []
+
+class UserAuth(BaseModel):
+    email: EmailStr
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class ApplicationCreate(BaseModel):
+    company_name: str
+    role: str
+    status: str
+    applied_date: datetime
+    interview_date: Optional[datetime] = None
+    notes: Optional[str] = None
+    job_description: Optional[str] = None
+
+class ApplicationUpdate(BaseModel):
+    company_name: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    applied_date: Optional[datetime] = None
+    interview_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+class ActionPlanItem(BaseModel):
+    priority: str
+    title: str
+    description: str
+
+class ResumeCompleteness(BaseModel):
+    has_summary: bool
+    has_projects: bool
+    has_experience: bool
+    has_skills_section: bool
+    has_education: bool
+
+class ApplicationAnalysis(BaseModel):
+    overall_match_score: int
+    experience_alignment: str
+    skills_found: List[str]
+    missing_skills: List[str]
+    strengths: List[str]
+    weaknesses: List[str]
+    improvement_suggestions: List[str]
+    ats_score: int
+    summary: str
+    resume_completeness: ResumeCompleteness
+    resume_snapshot: str  # the resume text used at the time of analysis
+    job_description: Optional[str] = None # the specific JD used
+
+class Application(Document):
+    user_id: str
+    company_name: str
+    role: str
+    status: str = "Applied"
+    applied_date: datetime = datetime.now()
+    interview_date: Optional[datetime] = None
+    notes: Optional[str] = None
+    job_description: Optional[str] = None
+    
+    # Flattened AI Analysis Fields
+    ai_match_score: Optional[int] = None 
+    ai_experience_alignment: Optional[str] = None
+    ai_summary: Optional[str] = None
+    ai_missing_skills: List[str] = []
+    ai_suggestions: List[str] = []
+    
+    created_at: datetime = datetime.now()
+    updated_at: datetime = datetime.now()
+
+    class Settings:
+        name = "applications"
+
+class Reminder(Document):
+    user_id: str
+    application_id: str
+    date: datetime = datetime.now()
+    type: str = "Follow-up"
+
+    class Settings:
+        name = "reminders"
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    timestamp: datetime = datetime.now()
+
+class ChatHistory(Document):
+    user_email: str
+    messages: List[ChatMessage] = []
+    created_at: datetime = datetime.now()
+
+    class Settings:
+        name = "chat_histories"
+
+# --- RESUME ANALYSIS MODELS ---
+
+class ResumeAnalysis(Document):
+    user_email: str
+    resume_text: str
+    job_description: str
+    overall_match_score: int
+    experience_alignment: str
+    skills_found: List[str]
+    missing_skills: List[str]
+    strengths: List[str]
+    weaknesses: List[str]
+    improvement_suggestions: List[str]
+    ats_score: int
+    summary: str
+    resume_completeness: ResumeCompleteness
+    created_at: datetime = datetime.now()
+
+    class Settings:
+        name = "resume_analyses"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTOMATION MODELS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AutomationCreate(BaseModel):
+    application_id: str
+    type: Literal["followup", "interview", "status"]
+    scheduled_at: datetime
+    email_enabled: bool = True
+    ai_prep_enabled: bool = True
+
+class AutomationUpdate(BaseModel):
+    status: Optional[Literal["active", "paused", "completed"]] = None
+    email_enabled: Optional[bool] = None
+    ai_prep_enabled: Optional[bool] = None
+    scheduled_at: Optional[datetime] = None
+
+class Automation(Document):
+    user_id: str                          # stores user email (matches Application.user_id)
+    application_id: str
+    type: str                             # followup | interview | status
+    scheduled_at: datetime
+    email_enabled: bool = True
+    ai_prep_enabled: bool = True
+    status: str = "active"               # active | paused | completed
+    created_at: datetime = datetime.now()
+
+    class Settings:
+        name = "automations"
+
+class AutomationLog(Document):
+    automation_id: str
+    user_id: str
+    triggered_at: datetime = datetime.now()
+    email_sent: bool = False
+    ai_tips: Optional[str] = None
+    error: Optional[str] = None
+
+    class Settings:
+        name = "automation_logs"

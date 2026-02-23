@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 3 7% 7%;
+    --foreground: 210 40% 98%;
+    --card: 12 7% 12%;
+    --card-foreground: 210 40% 98%;
+    --popover: 12 7% 12%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 224 71% 54%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 259 65% 51%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 180 100% 50%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 240 6% 20%;
+    --muted-foreground: 215 14% 65%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
+    --ring: 224 71% 54%;
+    --chart-1: 224 71% 54%;
+    --chart-2: 259 65% 51%;
+    --chart-3: 180 100% 50%;
+    --chart-4: 142 70% 45%;
+    --chart-5: 12 76% 61%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 3 7% 7%;
+    --foreground: 210 40% 98%;
+    --card: 12 7% 12%;
+    --card-foreground: 210 40% 98%;
+    --popover: 12 7% 12%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 224 71% 54%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 259 65% 51%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 180 100% 50%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 240 6% 20%;
+    --muted-foreground: 215 14% 65%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
+    --ring: 224 71% 54%;
+    --chart-1: 224 71% 54%;
+    --chart-2: 259 65% 51%;
+    --chart-3: 180 100% 50%;
+    --chart-4: 142 70% 45%;
+    --chart-5: 12 76% 61%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .glass {
+    @apply bg-white/5 backdrop-blur-md border border-white/10;
+  }
+
+  .glass-hover {
+    @apply transition-all duration-300 hover:bg-white/10 hover:shadow-lg hover:-translate-y-1;
+  }
+
+  .glow {
+    @apply shadow-lg shadow-primary/20;
+  }
+
+  .glow-accent {
+    @apply shadow-lg shadow-accent/20;
+  }
+}
