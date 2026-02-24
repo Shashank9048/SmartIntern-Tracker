@@ -49,6 +49,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshUser = async () => {
     const currentToken = token || localStorage.getItem('access_token');
     if (currentToken) {
+      // Set the token in state immediately to avoid race conditions
+      if (!token) setToken(currentToken);
       await loadUserFromBackend(currentToken);
     }
   }

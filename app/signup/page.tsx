@@ -30,6 +30,7 @@ export default function SignupPage() {
   const [skills, setSkills] = useState<string[]>([])
   const [branch, setBranch] = useState('')
   const [graduationYear, setGraduationYear] = useState('')
+  const [resumeFile, setResumeFile] = useState<File | null>(null)
   const { refreshUser } = useAuth()
   const router = useRouter()
 
@@ -51,6 +52,7 @@ export default function SignupPage() {
 
     setLoading(true)
     try {
+      // 1. Signup
       const res = await fetch(`${API_URL}/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -67,7 +69,6 @@ export default function SignupPage() {
       const data = await res.json()
 
       if (!res.ok) {
-        // Surface the exact backend error message
         const msg = data?.detail || data?.message || `Error ${res.status}`
         throw new Error(msg)
       }
@@ -80,7 +81,19 @@ export default function SignupPage() {
       localStorage.setItem('access_token', data.access_token)
       document.cookie = `access_token=${data.access_token}; path=/; max-age=604800`
 
-      // Sync auth context
+      // 2. Upload Resume if provided
+      if (resumeFile) {
+        try {
+          const { uploadResume } = await import('@/src/services/api')
+          await uploadResume(resumeFile)
+          toast.success('Resume uploaded successfully!')
+        } catch (uploadErr) {
+          console.error('Resume upload failed:', uploadErr)
+          toast.error('Account created, but resume upload failed. You can upload it later in settings.')
+        }
+      }
+
+      // 3. Sync auth context
       await refreshUser()
 
       toast.success('Account created! Welcome aboard 🎉')
@@ -250,6 +263,23 @@ export default function SignupPage() {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+
+            {/* Resume Upload */}
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Upload Resume <span className="text-muted-foreground font-normal">(Optional, PDF/DOCX)</span></label>
+              <Input
+                type="file"
+                accept=".pdf,.doc,.docx"
+                className="glass rounded-lg border-white/10 file:bg-primary/20 file:text-primary file:border-0 file:rounded-md file:px-3 file:py-1 file:mr-3 file:hover:bg-primary/30 transition-all cursor-pointer"
+                onChange={(e) => setResumeFile(e.target.files?.[0] || null)}
+                disabled={loading}
+              />
+              {resumeFile && (
+                <p className="text-xs text-primary flex items-center gap-1 mt-1">
+                  <CheckCircle2 className="w-3 h-3" /> Selected: {resumeFile.name}
+                </p>
               )}
             </div>
 

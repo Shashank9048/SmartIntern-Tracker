@@ -14,8 +14,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
-import { Search, LayoutGrid, List } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Search, LayoutGrid, List, Zap, RefreshCw } from 'lucide-react'
+import { useEffect, useState, useRef } from 'react'
 import { useAuth } from '@/context/auth-context'
 import { useApplicationContext } from '@/context/application-context'
 import { toast } from 'sonner'
@@ -26,11 +26,27 @@ import { Application } from '@/types'
 
 export default function ApplicationsPage() {
   const { user } = useAuth()
-  const { applications, loading, error, addApplication, updateApplication, deleteApplication } = useApplicationContext()
+  const { applications, loading, error, addApplication, updateApplication, deleteApplication, refetch } = useApplicationContext()
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [viewMode, setViewMode] = useState<'grid' | 'kanban'>('grid')
   const [editingApp, setEditingApp] = useState<Application | null>(null)
+  const [scoring, setScoring] = useState(false)
+  const autoScoredRef = useRef(false)
+
+  // Auto-score pending apps once user + apps both load
+  useEffect(() => {
+    const pendingCount = applications.filter((a: Application) => a.ai_match_score == null).length
+    if (
+      !loading &&
+      !autoScoredRef.current &&
+      pendingCount > 0 &&
+      (user as any)?.resume_text
+    ) {
+      autoScoredRef.current = true
+      handleScoreAll(true) // silent auto-score
+    }
+  }, [applications, loading, user])
 
   const filteredApplications = applications.filter((app: Application) => {
     const company = app.company_name || '';
@@ -90,6 +106,28 @@ export default function ApplicationsPage() {
     }
   }
 
+  const handleScoreAll = async (silent = false) => {
+    if (scoring) return
+    setScoring(true)
+    if (!silent) toast.loading('Scoring applications with AI…', { id: 'score-all' })
+    try {
+      const result: any = await APIClient.post('/api/applications/score-all', {})
+      if (!silent) {
+        toast.success(`Scored ${result.scored} application(s) with AI!`, { id: 'score-all' })
+      }
+      if (result.scored > 0) {
+        await refetch?.() // refresh app list to show new scores
+      }
+    } catch (err: any) {
+      if (!silent) toast.error(err?.message || 'Scoring failed', { id: 'score-all' })
+    } finally {
+      setScoring(false)
+    }
+  }
+
+  const pendingAICount = applications.filter((a: Application) => a.ai_match_score == null).length
+  const hasResume = !!(user as any)?.resume_text
+
   return (
     <AppLayout>
       <div className="space-y-6">
@@ -103,6 +141,39 @@ export default function ApplicationsPage() {
           </div>
           <AddApplicationModal onAdd={handleAddApplication} />
         </div>
+
+        {/* Score All Banner — shown when pending apps exist */}
+        {pendingAICount > 0 && hasResume && (
+          <div className="flex items-center justify-between gap-4 glass rounded-xl px-5 py-3 border border-primary/20 bg-primary/5">
+            <div className="flex items-center gap-3">
+              <Zap className="w-5 h-5 text-primary shrink-0" />
+              <p className="text-sm">
+                <span className="font-semibold text-white">{pendingAICount} application{pendingAICount > 1 ? 's' : ''}</span>
+                <span className="text-muted-foreground"> {pendingAICount > 1 ? 'are' : 'is'} missing an AI match score.</span>
+              </p>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => handleScoreAll(false)}
+              disabled={scoring}
+              className="shrink-0 bg-primary/20 text-primary hover:bg-primary/30 border border-primary/30"
+            >
+              {scoring
+                ? <><RefreshCw className="w-3 h-3 mr-1.5 animate-spin" /> Scoring…</>
+                : <><Zap className="w-3 h-3 mr-1.5" /> Score with AI</>}
+            </Button>
+          </div>
+        )}
+
+        {/* No-resume hint */}
+        {pendingAICount > 0 && !hasResume && (
+          <div className="flex items-center gap-3 glass rounded-xl px-5 py-3 border border-yellow-500/20 bg-yellow-500/5">
+            <Zap className="w-5 h-5 text-yellow-400 shrink-0" />
+            <p className="text-sm text-muted-foreground">
+              <span className="text-yellow-400 font-medium">Upload your resume</span> on the Resume page to get AI match scores for your applications.
+            </p>
+          </div>
+        )}
 
         {/* Filters */}
         <div className="flex flex-col md:flex-row gap-4">

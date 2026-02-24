@@ -77,119 +77,119 @@ async def get_gemini_response(prompt: str, retries: int = 3, delay: int = 5):
 async def analyze_resume_match(resume_text: str, job_desc: str):
     prompt = f"""
     You are an advanced AI Resume Evaluation Engine designed for internship and early-career technical roles.
-    Your job is to deeply analyze a candidate’s resume against a SPECIFIC job description and calculate a highly customized, dynamic compatibility score.
+    Your job is to deeply analyze a candidate's resume against a SPECIFIC job description and calculate a highly customized, dynamic compatibility score.
 
     TARGET JOB DESCRIPTION:
-    {job_desc[:4000]}...
+    {job_desc[:4000]}
 
     CANDIDATE RESUME:
-    {resume_text[:4000]}...
+    {resume_text[:4000]}
 
     Follow these rules STRICTLY:
 
-    1️⃣ Dynamic Job Role Calibration
-    First, identify the core nature of the Job Description (e.g., QA, SDE, Backend, Data Science, Product Management). The required skills and expectations change completely based on this role. Evaluate the resume strictly through the lens of THIS specific role.
+    1. Dynamic Job Role Calibration: Identify the core nature of the Job Description (e.g., QA, SDE, Backend, Data Science, Product Management). Evaluate the resume strictly through the lens of THIS specific role.
 
-    2️⃣ Keyword Extraction & Semantic Matching
-    Extract skills from the JD and Resume. Look for semantic matches (e.g., if JD wants 'Backend APIs' and Resume has 'Express.js Rest APIs', that is a semantic match). Do not punish for missing exact keywords if they have equivalent experience.
-    CRITICAL: Recognize tech stack acronyms (e.g., MERN = MongoDB, Express.js, React, Node.js. LAMP = Linux, Apache, MySQL, PHP).
+    2. Keyword Extraction & Semantic Matching: Extract skills from the JD and Resume. Look for semantic matches (e.g., 'Backend APIs' == 'Express.js Rest APIs'). Recognize tech stack acronyms (MERN, LAMP, etc.).
 
-    3️⃣ Calculate Dynamic Compatibility Score (0-100%)
-    You MUST calculate the score using this exact weighting:
-    - 40% Core Skills match (Does the candidate know the primary languages/frameworks required?)
-    - 30% Experience relevance (Does their past experience/projects align with the job responsibilities?)
-    - 20% Tools & Technologies (Do they know the supplementary tools, DBs, cloud platforms?)
-    - 10% Soft Skills (Communication, leadership, teamwork mentioned in JD vs Resume)
+    3. Dynamic Compatibility Score (0-100) using this weighting:
+    - 40% Core Skills match
+    - 30% Experience relevance
+    - 20% Tools & Technologies
+    - 10% Soft Skills
+    RULE: Never give 0 if candidate has any IT/Software background. Realistic scores: 25-45 weak, 50-75 average, 75-95 strong.
 
-    CRITICAL RULE: NEVER give a 0% match score if the candidate has at least some IT/Software background or partial skills. Even tangential skills should earn some points. Ensure the score feels realistic (e.g., 25-45% for weak matches, 50-75% for average matches, 75-95% for strong matches).
+    4. Missing Skills: List ONLY skills from the JD completely missing from resume.
 
-    4️⃣ Extract Missing Skills & Action Plan
-    List ONLY skills from the JD that are completely missing from the resume.
-    Provide an action plan with priority (High, Medium, Low) on exactly how the candidate can bridge these specific gaps or update their resume structure.
+    5. Improvement Suggestions: Actionable steps the candidate can take to improve their match for this specific role.
 
-    5️⃣ Experience Alignment
-    Evaluate how the candidate's past work or projects align with the JD daily responsibilities. Return exactly one: "High", "Medium", "Low".
+    6. Experience Alignment: Return exactly one of: "High", "Medium", "Low".
 
-    6️⃣ Resume Completeness
-    Evaluate basic structure (summary, projects, experience, skills_section, education).
+    7. Strengths: List 3-5 specific strengths of this resume for the role.
 
-    Output ONLY raw JSON in this exact structure format: 
+    8. Weaknesses: List 2-4 specific weaknesses or gaps.
+
+    9. Summary: Write a 2-3 sentence AI summary of how well this candidate fits the role.
+
+    10. Resume Completeness: Check basic structure (summary, projects, experience, skills_section, education).
+
+    Output ONLY valid JSON in EXACTLY this structure. Do NOT use markdown or backticks:
     {{
-      "match_score": 0,
+      "overall_match_score": 0,
+      "ats_score": 0,
       "experience_alignment": "Low",
+      "summary": "",
       "skills_found": [],
       "missing_skills": [],
       "strengths": [],
       "weaknesses": [],
-      "action_plan": [
-        {{
-          "priority": "High",
-          "title": "",
-          "description": ""
-        }}
-      ],
-      "ats_score": 0,
+      "improvement_suggestions": [],
       "resume_completeness": {{
-        "has_summary": true,
-        "has_projects": true,
-        "has_experience": true,
-        "has_skills_section": true,
-        "has_education": true
+        "has_summary": false,
+        "has_projects": false,
+        "has_experience": false,
+        "has_skills_section": false,
+        "has_education": false
       }}
     }}
-    
-    Do NOT give explanations outside JSON. Return valid JSON only. Do NOT wrap in markdown or backticks.
     """
-    
+
     raw_text = await get_gemini_response(prompt)
-    
+
+    # Default safe response
+    default = {
+        "overall_match_score": 0,
+        "ats_score": 0,
+        "experience_alignment": "Low",
+        "summary": "Analysis could not be completed. Please try again.",
+        "skills_found": [],
+        "missing_skills": [],
+        "strengths": [],
+        "weaknesses": [],
+        "improvement_suggestions": ["Please try analyzing again."],
+        "resume_completeness": {
+            "has_summary": False,
+            "has_projects": False,
+            "has_experience": False,
+            "has_skills_section": False,
+            "has_education": False,
+        }
+    }
+
     try:
-        # Strip code blocks
+        # Strip markdown code fences
         clean_json = raw_text.replace("```json", "").replace("```", "").strip()
 
-        # Regex strictly to json block
+        # Extract the outermost JSON object
         json_match = re.search(r'\{.*\}', clean_json, re.DOTALL)
         if json_match:
             clean_json = json_match.group(0)
 
-        # Fix AI hallucinations with Python dictionary strings
+        # Fix single-quote JSON from AI
         if clean_json.startswith("'"):
             clean_json = clean_json.replace("'", '"')
-            
-        # Strip trailing commas that break json.loads
+
+        # Strip trailing commas
         clean_json = re.sub(r',\s*\}', '}', clean_json)
         clean_json = re.sub(r',\s*\]', ']', clean_json)
 
         try:
-            return json.loads(clean_json)
+            result = json.loads(clean_json)
         except json.JSONDecodeError:
-            # Final fallback, literal AST dictionary evaluate
-            return ast.literal_eval(clean_json)
+            result = ast.literal_eval(clean_json)
+
+        # Normalise: support both old 'match_score' and new 'overall_match_score'
+        if "match_score" in result and "overall_match_score" not in result:
+            result["overall_match_score"] = result.pop("match_score")
+
+        # Ensure all keys exist (merge with defaults)
+        for key, val in default.items():
+            result.setdefault(key, val)
+
+        return result
+
     except Exception as e:
-        print(f"JSON Parse Error: {e}. Raw: {raw_text}")
-        return {
-            "match_score": 0, 
-            "experience_alignment": "Low",
-            "skills_found": [],
-            "missing_skills": [],
-            "strengths": [],
-            "weaknesses": [],
-            "action_plan": [{"priority": "High", "title": "Parse Error", "description": "AI failed to parse resume match. Please try again."}],
-            "ats_score": 0,
-            "resume_completeness": {"has_summary": False, "has_projects": False, "has_experience": False, "has_skills_section": False, "has_education": False}
-        }
-    except Exception as e:
-        return {
-            "match_score": 0, 
-            "experience_alignment": "Low",
-            "skills_found": [],
-            "missing_skills": [],
-            "strengths": [],
-            "weaknesses": [],
-            "action_plan": [{"priority": "High", "title": "Server Error", "description": f"Error: {str(e)}"}],
-            "ats_score": 0,
-            "resume_completeness": {"has_summary": False, "has_projects": False, "has_experience": False, "has_skills_section": False, "has_education": False}
-        }
+        print(f"JSON Parse Error in analyze_resume_match: {e}. Raw: {raw_text[:300]}")
+        return default
 
 
 async def parse_resume_json(resume_text: str):

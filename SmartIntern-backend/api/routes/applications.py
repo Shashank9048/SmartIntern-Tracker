@@ -85,3 +85,71 @@ async def delete_app(id: PydanticObjectId, current_user: str = Depends(get_curre
         raise HTTPException(status_code=404, detail="Application not found")
     await app.delete()
     return {"message": "Application deleted", "id": str(id)}
+
+
+@router.post("/{id}/score", response_model=Application)
+async def score_single_app(id: PydanticObjectId, current_user: str = Depends(get_current_user)):
+    """Compute or re-compute AI match score for a single application."""
+    app = await Application.get(id)
+    if not app or app.user_id != current_user:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    user = await User.find_one(User.email == current_user)
+    if not user or not user.resume_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload your resume first before scoring applications."
+        )
+
+    job_desc = app.job_description or f"{app.role} at {app.company_name}"
+    try:
+        analysis = await analyze_resume_match(user.resume_text, job_desc)
+        app.ai_match_score = analysis.get("overall_match_score", 0)
+        app.ai_experience_alignment = analysis.get("experience_alignment", "Low")
+        app.ai_summary = analysis.get("summary", "")
+        app.ai_missing_skills = analysis.get("missing_skills", [])
+        app.ai_suggestions = analysis.get("improvement_suggestions", [])
+        app.updated_at = datetime.now()
+        await app.save()
+        return app
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI scoring failed: {str(e)}")
+
+
+@router.post("/score-all")
+async def score_all_pending(current_user: str = Depends(get_current_user)):
+    """Score all applications that currently have no AI match score."""
+    user = await User.find_one(User.email == current_user)
+    if not user or not user.resume_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload your resume first before scoring applications."
+        )
+
+    apps = await Application.find(Application.user_id == current_user).to_list()
+    pending = [a for a in apps if a.ai_match_score is None]
+
+    scored = 0
+    errors = 0
+    for app in pending:
+        job_desc = app.job_description or f"{app.role} at {app.company_name}"
+        try:
+            analysis = await analyze_resume_match(user.resume_text, job_desc)
+            app.ai_match_score = analysis.get("overall_match_score", 0)
+            app.ai_experience_alignment = analysis.get("experience_alignment", "Low")
+            app.ai_summary = analysis.get("summary", "")
+            app.ai_missing_skills = analysis.get("missing_skills", [])
+            app.ai_suggestions = analysis.get("improvement_suggestions", [])
+            app.updated_at = datetime.now()
+            await app.save()
+            scored += 1
+        except Exception as e:
+            print(f"Score error for app {app.id}: {e}")
+            errors += 1
+
+    return {
+        "message": f"Scored {scored} application(s).",
+        "scored": scored,
+        "errors": errors,
+        "total_pending": len(pending),
+    }
