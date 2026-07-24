@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import Link from 'next/link'
 import { Eye, EyeOff } from 'lucide-react'
-import { loginUser } from '../../src/services/api'
 import { useAuth } from '@/context/auth-context'
 import { toast } from 'sonner'
 import Script from 'next/script'
@@ -25,7 +24,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const { login, loginWithGoogle, refreshUser } = useAuth()
+  const { login, loginWithGoogle } = useAuth()
   const router = useRouter()
 
   React.useEffect(() => {
@@ -50,23 +49,15 @@ export default function LoginPage() {
 
     setLoading(true)
     try {
-      // Direct API call as requested
-      const data = await loginUser(email, password)
+      // Use the AuthContext login() which now stores token + loads profile
+      await login(email, password)
 
-      // Save token manually
-      if (data.access_token) {
-        localStorage.setItem('access_token', data.access_token)
-        document.cookie = `access_token=${data.access_token}; path=/` // Optional: for middleware
+      toast.success('Login successful!')
 
-        // Refresh global AuthContext state!
-        await refreshUser()
-
-        toast.success('Login successful!')
-        // Use router as requested
-        router.push('/dashboard')
-      } else {
-        throw new Error('No access token received')
-      }
+      // Respect ?next= redirect if middleware bounced user here
+      const params = new URLSearchParams(window.location.search)
+      const nextPath = params.get('next') || '/dashboard'
+      router.push(nextPath)
     } catch (error) {
       console.error('Login Error:', error)
       toast.error(error instanceof Error ? error.message : 'Login failed')

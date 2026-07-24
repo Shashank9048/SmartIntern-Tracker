@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react'
 import { APIClient } from '@/lib/api-client'
-import { getUserProfile, UserProfile } from '../src/services/api'
+import { getUserProfile, loginUser, UserProfile } from '../src/services/api'
 
 // Extended user model including the API profile fields
 export interface AuthUser extends UserProfile {
@@ -24,78 +24,102 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [token, setToken] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
-
-  const loadUserFromBackend = async (authToken: string) => {
+  const loadUserFromBackend = React.useCallback(async (authToken: string) => {
     try {
-      localStorage.setItem('access_token', authToken);
-      const profile = await getUserProfile();
-      setUser(profile as AuthUser);
-      setToken(authToken);
-      localStorage.setItem('auth_user', JSON.stringify(profile));
+      localStorage.setItem('access_token', authToken)
+      const profile = await getUserProfile()
+      setUser(profile as AuthUser)
+      setToken(authToken)
+      localStorage.setItem('auth_user', JSON.stringify(profile))
     } catch (error) {
-      console.error('Failed to load user profile:', error);
+      console.error('Failed to load user profile:', error)
       // Only logout on explicit auth failure, not network issues
       if (error instanceof Error && error.message.includes('401')) {
-        logout();
+        logout()
       }
     }
-  }
+  }, [])
 
-  const refreshUser = async () => {
-    const currentToken = token || localStorage.getItem('access_token');
+  const refreshUser = React.useCallback(async () => {
+    const currentToken = localStorage.getItem('access_token')
     if (currentToken) {
-      await loadUserFromBackend(currentToken);
+      await loadUserFromBackend(currentToken)
     }
-  }
+  }, [loadUserFromBackend])
 
   useEffect(() => {
     const initializeAuth = async () => {
-      const storedToken = localStorage.getItem('access_token');
+      const storedToken = localStorage.getItem('access_token')
       if (storedToken) {
-        setToken(storedToken);
-        // Optimistic load
-        const storedUser = localStorage.getItem('auth_user');
+        setToken(storedToken)
+        // Optimistic load from cache first for instant UI
+        const storedUser = localStorage.getItem('auth_user')
         if (storedUser) {
           try {
-            const parsed = JSON.parse(storedUser);
-            setUser(parsed);
+            const parsed = JSON.parse(storedUser)
+            setUser(parsed)
           } catch (e) {
-            console.error('Failed to parse cached user', e);
+            console.error('Failed to parse cached user', e)
           }
         }
-        // Verify and get fresh data
-        await loadUserFromBackend(storedToken);
+        // Verify token and get fresh data from server
+        await loadUserFromBackend(storedToken)
       }
       setLoading(false)
     }
 
-    initializeAuth();
+    initializeAuth()
   }, [])
 
+  /**
+   * Full login implementation: calls backend, stores token, loads profile.
+   * Previously this was an empty stub — now it's the canonical login path.
+   */
   const login = async (email: string, password: string) => {
-    // Left empty as login is currently handled directly in the login page via services/api.ts
-    // This context structure remains to not break existing usage
+    const data = await loginUser(email, password)
+    if (!data.access_token) throw new Error('No access token received')
+
+    // Persist token in both localStorage and cookie (for Next.js middleware)
+    localStorage.setItem('access_token', data.access_token)
+    document.cookie = `access_token=${data.access_token}; path=/; max-age=604800; SameSite=Lax`
+
+    await loadUserFromBackend(data.access_token)
   }
 
-  const register = async (email: string, password: string, name: string) => {
-    // Left empty for same reason
+  const register = async (_email: string, _password: string, _name: string) => {
+    // Signup is handled directly on the signup page (it has extra fields like branch/skills).
+    // After signup the page calls refreshUser() to sync state — this stub stays for type compatibility.
   }
 
-  const loginWithGoogle = async (token: string) => {
-    // Left empty for same reason
+  const loginWithGoogle = async (_token: string) => {
+    // Google OAuth stub — kept for type compatibility
   }
 
   const logout = () => {
+    // Best-effort server-side ack (fire-and-forget — don't await, don't block UI)
+    const currentToken = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null
+    if (currentToken) {
+      fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentToken}` },
+      }).catch(() => {}) // silently ignore network errors on logout
+    }
+
+    // Clear client-side state
     setUser(null)
     setToken(null)
     APIClient.setToken(null)
     localStorage.removeItem('auth_user')
     localStorage.removeItem('access_token')
+    // Clear cookie too
+    document.cookie = 'access_token=; path=/; max-age=0; SameSite=Lax'
   }
 
   return (

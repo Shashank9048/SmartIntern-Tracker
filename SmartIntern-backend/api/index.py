@@ -36,7 +36,7 @@ from .models import (
     Application, User, UserAuth, UserSignup, Token, ResumeAnalysis,
     ChatHistory, ApplicationCreate, ApplicationUpdate, Reminder,
     Automation, AutomationLog, AutomationCreate, AutomationUpdate,
-    Resume, Job, UserJobMatch
+    Resume, Job, UserJobMatch, TrackedJob
 )
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .ai_utils import parse_resume_json, generate_cold_email_ai, get_career_coach_response, get_interview_tips_ai
@@ -137,7 +137,7 @@ async def lifespan(app: FastAPI):
                 document_models=[
                     Application, User, ResumeAnalysis, ChatHistory,
                     Reminder, Automation, AutomationLog, Resume, Job,
-                    UserJobMatch
+                    UserJobMatch, TrackedJob
                 ]
             )
             print("✅ Database Connected")
@@ -1287,3 +1287,6 @@ async def delete_automation(auto_id: PydanticObjectId, current_user: str = Depen
 
 from .routes.jobs import router as jobs_router
 app.include_router(jobs_router)
+
+from .routes.tracked_jobs import router as tracked_jobs_router
+app.include_router(tracked_jobs_router)

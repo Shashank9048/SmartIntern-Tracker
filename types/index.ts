@@ -291,3 +291,27 @@ export interface MatchStatusResponse {
   resume_version?: string
 }
 
+
+// Phase 6B — Tracked Jobs (feed-sourced kanban)
+
+export type TrackedJobStatus =
+  | 'wishlist'
+  | 'applied'
+  | 'oa'
+  | 'interview'
+  | 'offer'
+  | 'rejected'
+
+export interface TrackedJobEntry {
+  _id: string
+  status: TrackedJobStatus
+  match_score_at_save: number
+  applied_at: string
+  updated_at: string
+  job: {
+    title: string
+    company: string
+    location: string
+  }
+  job_id: string
+}

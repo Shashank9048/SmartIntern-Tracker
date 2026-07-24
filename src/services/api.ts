@@ -234,6 +234,68 @@ export const analyzeResume = async ({ jobDescription, resumeText }: { jobDescrip
   return response.json();
 };
 
+// --- Resume Profile (Phase 2 — Structured Storage) ---
+
+export interface ParsedResumeJson {
+  name?: string;
+  email?: string;
+  linkedin?: string;
+  phone?: string;
+  skills?: string[];
+  education?: string[];
+  experience?: string[];
+  projects?: string[];
+  certifications?: string[];
+}
+
+export interface ResumeProfile {
+  id: string | null;
+  user_id: string;
+  status: 'pending' | 'parsed' | 'failed';
+  raw_text: string;
+  parsed_json: ParsedResumeJson;
+  file_url: string | null;
+  original_filename: string | null;
+  uploaded_at: string | null;
+  resume_version: string;
+}
+
+/**
+ * GET /api/resume/me — returns the user's structured Resume document (Phase 2).
+ * Returns null if no resume has been uploaded yet (404 → null).
+ */
+export const getResumeProfile = async (): Promise<ResumeProfile | null> => {
+  try {
+    const response = await fetch(`${BASE_URL}/api/resume/me`, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const errorData = await handleApiError(response, 'Get Resume Profile');
+      throw new Error(errorData.detail || 'Failed to fetch resume profile');
+    }
+    return response.json();
+  } catch (error) {
+    console.error('getResumeProfile error:', error);
+    return null;
+  }
+};
+
+/**
+ * DELETE /api/resume/me — permanently deletes the user's stored Resume document.
+ */
+export const deleteResume = async (): Promise<void> => {
+  const response = await fetch(`${BASE_URL}/api/resume/me`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok && response.status !== 204) {
+    const errorData = await handleApiError(response, 'Delete Resume');
+    throw new Error(errorData.detail || 'Failed to delete resume');
+  }
+};
+
 // --- AI Chat ---
 
 export const chatWithAI = async (message: string): Promise<string> => {
@@ -261,3 +323,38 @@ export const deleteUserProfile = async (): Promise<void> => {
   }
 };
 
+/**
+ * Calls POST /auth/logout — backend ack for JWT logout.
+ * Token invalidation is client-side; this just notifies the server.
+ */
+export const logoutUser = async (): Promise<void> => {
+  try {
+    const response = await fetch(`${BASE_URL}/auth/logout`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) {
+      console.warn('Logout endpoint returned non-OK status:', response.status);
+    }
+  } catch (err) {
+    // Silently swallow — if the server is unreachable on logout, that's fine
+    console.warn('Logout request failed (ignoring):', err);
+  }
+};
+
+/**
+ * GET /auth/me — spec-compliant alias for getUserProfile.
+ * Returns the authenticated user's full profile.
+ */
+export const getAuthMe = async (): Promise<UserProfile> => {
+  const response = await fetch(`${BASE_URL}/auth/me`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    console.error('Auth/me failed:', response.status, text.substring(0, 100));
+    throw new Error(`Failed to fetch auth profile (${response.status})`);
+  }
+  return response.json();
+};

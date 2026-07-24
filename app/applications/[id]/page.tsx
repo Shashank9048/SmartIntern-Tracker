@@ -89,7 +89,15 @@ export default function ApplicationDetailsPage() {
         )
     }
 
-    const { analysis } = application
+    const analysis = application.analysis || (application.ai_match_score !== undefined ? {
+        match_score: application.ai_match_score,
+        experience_alignment: application.ai_experience_alignment,
+        summary: application.ai_summary,
+        missing_skills: application.ai_missing_skills,
+        improvement_suggestions: application.ai_suggestions,
+    } : undefined)
+
+    const matchScore = analysis?.match_score ?? analysis?.overall_match_score ?? application.ai_match_score ?? 0
 
     return (
         <AppLayout>
@@ -142,16 +150,16 @@ export default function ApplicationDetailsPage() {
                     <div className="space-y-6 animate-in slide-in-from-bottom-8 duration-700">
                         {/* Compatibility Score Header */}
                         <div className="glass rounded-xl p-8 glow relative overflow-hidden">
-                            <div className={`absolute top-0 right-0 w-64 h-64 bg-current opacity-5 blur-3xl rounded-full translate-x-1/2 -translate-y-1/2 ${getScoreColor(analysis.match_score)}`} />
+                            <div className={`absolute top-0 right-0 w-64 h-64 bg-current opacity-5 blur-3xl rounded-full translate-x-1/2 -translate-y-1/2 ${getScoreColor(matchScore)}`} />
 
                             <div className="flex flex-col md:flex-row items-center gap-10 relative z-10">
                                 <div className="relative w-40 h-40 flex items-center justify-center shrink-0">
                                     <svg className="w-full h-full transform -rotate-90">
                                         <circle cx="80" cy="80" r="72" stroke="currentColor" strokeWidth="10" fill="transparent" className="text-white/5" />
-                                        <circle cx="80" cy="80" r="72" stroke="currentColor" strokeWidth="10" fill="transparent" strokeDasharray={452} strokeDashoffset={452 - (452 * analysis.match_score) / 100} className={`transition-all duration-1500 ease-out ${getScoreColor(analysis.match_score)}`} strokeLinecap="round" />
+                                        <circle cx="80" cy="80" r="72" stroke="currentColor" strokeWidth="10" fill="transparent" strokeDasharray={452} strokeDashoffset={452 - (452 * matchScore) / 100} className={`transition-all duration-1500 ease-out ${getScoreColor(matchScore)}`} strokeLinecap="round" />
                                     </svg>
                                     <div className="absolute inset-0 flex flex-col items-center justify-center">
-                                        <span className={`text-4xl font-extrabold ${getScoreColor(analysis.match_score)}`}>{analysis.match_score}%</span>
+                                        <span className={`text-4xl font-extrabold ${getScoreColor(matchScore)}`}>{matchScore}%</span>
                                         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mt-1">Match</span>
                                     </div>
                                 </div>
@@ -163,14 +171,18 @@ export default function ApplicationDetailsPage() {
                                     </div>
 
                                     <div className="flex flex-wrap gap-4 justify-center md:justify-start">
-                                        <div className="bg-black/30 px-4 py-3 rounded-xl border border-white/5">
-                                            <span className="block text-xs uppercase tracking-wider text-muted-foreground mb-1">ATS Score</span>
-                                            <span className="font-bold text-xl text-white">{analysis.ats_score}%</span>
-                                        </div>
-                                        <div className="bg-black/30 px-4 py-3 rounded-xl border border-white/5">
-                                            <span className="block text-xs uppercase tracking-wider text-muted-foreground mb-1">Experience Alignment</span>
-                                            <span className={`font-bold text-xl ${analysis.experience_alignment === 'High' ? 'text-green-400' : analysis.experience_alignment === 'Medium' ? 'text-yellow-400' : 'text-red-400'}`}>{analysis.experience_alignment}</span>
-                                        </div>
+                                        {analysis.ats_score !== undefined && (
+                                            <div className="bg-black/30 px-4 py-3 rounded-xl border border-white/5">
+                                                <span className="block text-xs uppercase tracking-wider text-muted-foreground mb-1">ATS Score</span>
+                                                <span className="font-bold text-xl text-white">{analysis.ats_score}%</span>
+                                            </div>
+                                        )}
+                                        {analysis.experience_alignment && (
+                                            <div className="bg-black/30 px-4 py-3 rounded-xl border border-white/5">
+                                                <span className="block text-xs uppercase tracking-wider text-muted-foreground mb-1">Experience Alignment</span>
+                                                <span className={`font-bold text-xl ${analysis.experience_alignment === 'High' ? 'text-green-400' : analysis.experience_alignment === 'Medium' ? 'text-yellow-400' : 'text-red-400'}`}>{analysis.experience_alignment}</span>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>

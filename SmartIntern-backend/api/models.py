@@ -1,7 +1,7 @@
-from beanie import Document
-from pydantic import BaseModel, EmailStr
+from beanie import Document, PydanticObjectId
+from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Any, Dict
 
 class DashboardInsightCache(BaseModel):
     last_updated: datetime = datetime.now()
@@ -9,6 +9,85 @@ class DashboardInsightCache(BaseModel):
     improvement_strategy: str
     follow_up_suggestions: List[str]
     learning_roadmap: str
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOBS — job postings (Phase 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Job(Document):
+    title: str
+    company: str
+    description: str
+    required_skills: List[str] = []
+    location: str
+    source: Literal["manual", "adzuna", "jsearch", "mock"] = "mock"
+    external_id: Optional[str] = None
+    posted_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    class Settings:
+        name = "jobs"
+
+class UserJobMatch(Document):
+    user_id: str
+    job_id: str
+    match_score: int
+    matched_skills: List[str] = []
+    missing_skills: List[str] = []
+    resume_version: str
+    computed_at: datetime = Field(default_factory=datetime.now)
+
+    class Settings:
+        name = "user_job_matches"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRACKED JOB — feed-sourced kanban tracker (Phase 6B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TrackedJob(Document):
+    """
+    Created when a user clicks Apply or Save on a recommended job card.
+    Distinct from Application (manual tracker) — this collection is linked
+    to a Job document via job_id.
+    """
+    user_id: str                          # user email
+    job_id: str                           # str(_id) of Job document
+    status: Literal[
+        "wishlist", "applied", "oa",
+        "interview", "offer", "rejected"
+    ] = "wishlist"
+    match_score_at_save: int = 0          # locked from UserJobMatch at creation
+    applied_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+    class Settings:
+        name = "tracked_jobs"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESUME — structured storage (Phase 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Resume(Document):
+    """
+    One document per user (upserted on every upload).
+    parsed_json holds the Gemini-extracted structure:
+      { name, email, linkedin, phone, skills[], education[], experience[], projects[], certifications[] }
+    resume_version is a short hash of raw_text so matching can skip re-scoring
+    unchanged resumes.
+    """
+    user_id: str                          # user email (FK → User.email)
+    raw_text: str                         # full extracted PDF/DOCX text
+    parsed_json: Dict[str, Any] = {}      # Gemini-parsed structured data
+    file_url: Optional[str] = None        # /static/resumes/<filename>
+    original_filename: Optional[str] = None
+    uploaded_at: datetime = Field(default_factory=datetime.now)
+    resume_version: str = ""              # sha256[:12] of raw_text for cache-busting
+    status: str = "parsed"                # pending | parsed | failed
+    cloudinary_public_id: Optional[str] = None
+
+    class Settings:
+        name = "resumes"
 
 # --- AUTH MODELS ---
 class User(Document):
@@ -18,9 +97,12 @@ class User(Document):
     branch: str = ""
     graduation_year: str = ""
     skills: List[str] = []
-    resume_text: Optional[str] = None
+    resume_text: Optional[str] = None       # kept for backward compat with existing AI features
     uploaded_file_url: Optional[str] = None
     profile_picture: Optional[str] = None
+    # Phase 2 additions
+    resume_id: Optional[str] = None         # str(_id) of the Resume document
+    profile_complete_pct: int = 0           # 0-100, updated on each save
     preferences: dict = {"theme": "system", "notifications": {"email": True, "interview": True, "marketing": False}}
     dashboard_insights: Optional[DashboardInsightCache] = None
     created_at: datetime = datetime.now()

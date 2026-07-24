@@ -6,6 +6,7 @@ import { AddApplicationModal } from '@/components/applications/add-application-m
 import { EditApplicationModal } from '@/components/applications/edit-application-modal'
 import { ApplicationCard } from '@/components/applications/application-card'
 import { JobCard } from '@/components/applications/job-card'
+import { KanbanBoard } from '@/components/applications/kanban-board'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -31,7 +32,7 @@ import { useApplicationContext } from '@/context/application-context'
 import { toast } from 'sonner'
 import Link from 'next/link'
 
-import { Application, RecommendedJobEntry, MatchStatus, TrackedJobStatus } from '@/types'
+import { Application, RecommendedJobEntry, MatchStatus, TrackedJobStatus, TrackedJobEntry } from '@/types'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-components for the Recommended feed states
@@ -179,6 +180,50 @@ export default function ApplicationsPage() {
   // Track which job_ids have been actioned (applied/saved)
   const [trackedJobIds, setTrackedJobIds] = useState<Set<string>>(new Set())
 
+  // ── Job Tracker (feed-sourced kanban) state ────────────────────────────
+  const [trackedJobs, setTrackedJobs] = useState<TrackedJobEntry[]>([])
+  const [trackerLoading, setTrackerLoading] = useState(false)
+  const trackerFetchedRef = useRef(false)
+
+  const fetchTrackedJobs = useCallback(async () => {
+    setTrackerLoading(true)
+    try {
+      const data = await APIClient.get<TrackedJobEntry[]>('/api/tracked-jobs')
+      setTrackedJobs(data)
+      // Pre-populate the actioned set so JobCards in the feed show 'Tracked'
+      setTrackedJobIds(new Set(data.map((t) => t.job_id)))
+    } catch {
+      // Silently fail
+    } finally {
+      setTrackerLoading(false)
+    }
+  }, [])
+
+  const handleKanbanStatusChange = async (id: string, newStatus: TrackedJobStatus) => {
+    try {
+      const updated = await APIClient.patch<TrackedJobEntry>(`/api/tracked-jobs/${id}`, { status: newStatus })
+      setTrackedJobs((prev) => prev.map((t) => (t._id === id ? updated : t)))
+      const colLabels: Record<TrackedJobStatus, string> = {
+        wishlist: 'Wishlist', applied: 'Applied', oa: 'OA',
+        interview: 'Interview', offer: 'Offer', rejected: 'Rejected'
+      }
+      toast.success(`✓ Moved to ${colLabels[newStatus]}`, { duration: 2000 })
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to update status')
+      throw e // Let KanbanBoard revert optimistic update
+    }
+  }
+
+  const handleKanbanDelete = async (id: string) => {
+    try {
+      await APIClient.delete(`/api/tracked-jobs/${id}`)
+      setTrackedJobs((prev) => prev.filter((t) => t._id !== id))
+      toast.success('✓ Removed from tracker', { duration: 2000 })
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to remove')
+    }
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   const fetchRecommended = useCallback(async () => {
@@ -247,6 +292,14 @@ export default function ApplicationsPage() {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [checkStatus])
+
+  // Fetch tracked jobs when My Applications tab is first opened
+  useEffect(() => {
+    if (activeTab === 'applications' && !trackerFetchedRef.current) {
+      trackerFetchedRef.current = true
+      fetchTrackedJobs()
+    }
+  }, [activeTab, fetchTrackedJobs])
 
   // Auto-score pending application cards once user + apps load
   useEffect(() => {
@@ -628,8 +681,8 @@ export default function ApplicationsPage() {
                 ))}
               </div>
             ) : (
-              /* Phase 6: KanbanBoard component goes here, replacing this column layout */
-              <div className="flex gap-6 overflow-x-auto pb-4 custom-scrollbar">
+              /* Real KanbanBoard for manual applications */
+              <div className="flex gap-6 overflow-x-auto pb-4" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}>
                 {['Applied', 'Interview', 'Selected', 'Rejected'].map((statusOption) => (
                   <div
                     key={statusOption}
@@ -673,6 +726,57 @@ export default function ApplicationsPage() {
                 <AddApplicationModal onAdd={handleAddApplication} />
               </div>
             )}
+
+            {/* ════════════════════════════════════════════════════ */}
+            {/* JOB TRACKER — feed-sourced kanban (Phase 6B)             */}
+            {/* ════════════════════════════════════════════════════ */}
+            <div className="pt-2">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h2 className="text-base font-semibold flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+                    Job Tracker
+                  </h2>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Jobs saved/applied from the Recommended feed · drag to update status
+                  </p>
+                </div>
+                <button
+                  onClick={fetchTrackedJobs}
+                  className="text-xs text-muted-foreground hover:text-white flex items-center gap-1 transition-colors"
+                  disabled={trackerLoading}
+                >
+                  <RefreshCw className={`w-3 h-3 ${trackerLoading ? 'animate-spin' : ''}`} />
+                  {trackerLoading ? 'Loading…' : 'Refresh'}
+                </button>
+              </div>
+
+              {trackerLoading ? (
+                <div className="flex gap-3 overflow-x-auto pb-4">
+                  {[1,2,3,4,5,6].map((n) => (
+                    <div key={n} className="min-w-[230px] h-[120px] glass rounded-xl animate-pulse" />
+                  ))}
+                </div>
+              ) : trackedJobs.length === 0 ? (
+                <div className="border border-dashed border-white/10 rounded-xl py-8 flex flex-col items-center justify-center gap-2 bg-white/[0.01]">
+                  <p
+                    className="text-sm text-muted-foreground font-mono"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {'> no jobs tracked yet'}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Click Save or Apply on a Recommended card to add jobs here.
+                  </p>
+                </div>
+              ) : (
+                <KanbanBoard
+                  items={trackedJobs}
+                  onStatusChange={handleKanbanStatusChange}
+                  onDelete={handleKanbanDelete}
+                />
+              )}
+            </div>
           </div>
         )}
       </div>
