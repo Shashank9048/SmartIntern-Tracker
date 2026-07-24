@@ -1,21 +1,29 @@
 'use client'
 
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { MapPin, Building2, Calendar, ExternalLink, Bookmark } from 'lucide-react'
+import { MapPin, Building2, Calendar, ExternalLink, Bookmark, Check } from 'lucide-react'
 import { RecommendedJobEntry } from '@/types'
 
 interface JobCardProps {
   entry: RecommendedJobEntry
+  /** Called after a successful Save (wishlist) or Apply action */
+  onApply?: (jobId: string) => void
+  onSave?: (jobId: string) => void
+  /** True when this job is already tracked in the kanban */
+  isTracked?: boolean
 }
 
-/** Colour-coded score badge */
+/** Colour-coded score badge — amber for ≥70, dimmer for lower */
 function ScoreBadge({ score }: { score: number }) {
   const colour =
     score >= 85
       ? 'text-amber-400'
       : score >= 70
       ? 'text-amber-300'
-      : 'text-amber-200/70'
+      : score >= 50
+      ? 'text-amber-200/70'
+      : 'text-white/40'
 
   return (
     <div className="flex flex-col items-end shrink-0">
@@ -43,7 +51,6 @@ function SkillDiff({
   matched: string[]
   missing: string[]
 }) {
-  // Show at most 4 matched + 4 missing to keep card compact
   const showMatched = matched.slice(0, 4)
   const showMissing = missing.slice(0, 4)
   const extraMatched = matched.length - showMatched.length
@@ -89,8 +96,11 @@ function SkillDiff({
   )
 }
 
-export function JobCard({ entry }: JobCardProps) {
-  const { job, match_score, matched_skills, missing_skills } = entry
+export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardProps) {
+  const { job, match_score, matched_skills, missing_skills, job_id } = entry
+  const [actioning, setActioning] = useState<'apply' | 'save' | null>(null)
+  const [tracked, setTracked] = useState(isTracked)
+  const [trackedAs, setTrackedAs] = useState<'applied' | 'wishlist' | null>(null)
 
   const postedDate = job.posted_at
     ? new Date(job.posted_at).toLocaleDateString('en-IN', {
@@ -99,11 +109,51 @@ export function JobCard({ entry }: JobCardProps) {
       })
     : null
 
+  const handleApply = async () => {
+    if (actioning || tracked) return
+    setActioning('apply')
+    try {
+      onApply?.(job_id)
+      setTracked(true)
+      setTrackedAs('applied')
+    } finally {
+      setActioning(null)
+    }
+  }
+
+  const handleSave = async () => {
+    if (actioning || tracked) return
+    setActioning('save')
+    try {
+      onSave?.(job_id)
+      setTracked(true)
+      setTrackedAs('wishlist')
+    } finally {
+      setActioning(null)
+    }
+  }
+
   return (
-    <div className="glass rounded-2xl p-5 flex flex-col gap-3 min-w-[300px] max-w-[340px] shrink-0 hover:bg-white/10 transition-all duration-300 border border-white/10 hover:border-amber-400/20 hover:shadow-lg hover:shadow-amber-400/5 group">
+    <div
+      className={`glass rounded-2xl p-5 flex flex-col gap-3 min-w-[300px] max-w-[340px] shrink-0 transition-all duration-300 border group relative
+        ${tracked
+          ? 'border-emerald-500/30 bg-emerald-500/5'
+          : 'border-white/10 hover:bg-white/10 hover:border-amber-400/20 hover:shadow-lg hover:shadow-amber-400/5'
+        }`}
+    >
+      {/* Tracked badge overlay */}
+      {tracked && (
+        <div className="absolute top-3 right-3 flex items-center gap-1 bg-emerald-500/20 border border-emerald-500/30 rounded-full px-2 py-0.5">
+          <Check className="w-3 h-3 text-emerald-400" />
+          <span className="text-xs text-emerald-400 font-mono" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+            {trackedAs === 'applied' ? 'Applied' : 'Saved'}
+          </span>
+        </div>
+      )}
+
       {/* Top row: title + score */}
       <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pr-12">
           <h3
             className="text-base font-semibold leading-snug truncate text-white group-hover:text-amber-50 transition-colors"
             style={{ fontFamily: "'Space Grotesk', sans-serif" }}
@@ -135,7 +185,11 @@ export function JobCard({ entry }: JobCardProps) {
       {/* Score bar */}
       <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
         <div
-          className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-300 transition-all duration-700"
+          className={`h-full rounded-full transition-all duration-700 ${
+            tracked
+              ? 'bg-gradient-to-r from-emerald-500 to-emerald-400'
+              : 'bg-gradient-to-r from-amber-500 to-amber-300'
+          }`}
           style={{ width: `${match_score}%` }}
         />
       </div>
@@ -143,37 +197,45 @@ export function JobCard({ entry }: JobCardProps) {
       {/* Skill diff */}
       <SkillDiff matched={matched_skills} missing={missing_skills} />
 
-      {/* Actions — disabled until Phase 6 */}
+      {/* Actions */}
       <div className="flex gap-2 mt-auto pt-1">
-        <div className="relative flex-1 group/tip">
-          <Button
-            size="sm"
-            disabled
-            className="w-full bg-amber-500/10 text-amber-400/50 border border-amber-400/10 cursor-not-allowed hover:bg-amber-500/10"
-            aria-label="Apply — Coming in Phase 6"
-          >
-            <ExternalLink className="w-3.5 h-3.5 mr-1.5" />
-            Apply
-          </Button>
-          <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 rounded bg-black/80 text-white text-xs whitespace-nowrap opacity-0 group-hover/tip:opacity-100 transition-opacity z-10">
-            Coming in Phase 6
-          </span>
-        </div>
-        <div className="relative flex-1 group/tip2">
-          <Button
-            size="sm"
-            disabled
-            variant="outline"
-            className="w-full border-white/10 text-white/30 cursor-not-allowed hover:bg-transparent"
-            aria-label="Save — Coming in Phase 6"
-          >
-            <Bookmark className="w-3.5 h-3.5 mr-1.5" />
-            Save
-          </Button>
-          <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 rounded bg-black/80 text-white text-xs whitespace-nowrap opacity-0 group-hover/tip2:opacity-100 transition-opacity z-10">
-            Coming in Phase 6
-          </span>
-        </div>
+        <Button
+          size="sm"
+          onClick={handleApply}
+          disabled={!!actioning || tracked}
+          className={`flex-1 transition-all ${
+            tracked
+              ? 'bg-emerald-500/10 text-emerald-400/50 border border-emerald-500/10 cursor-not-allowed'
+              : 'bg-amber-500/15 text-amber-400 border border-amber-400/20 hover:bg-amber-500/25 hover:border-amber-400/40'
+          }`}
+        >
+          {actioning === 'apply' ? (
+            <span className="animate-pulse">…</span>
+          ) : tracked && trackedAs === 'applied' ? (
+            <><Check className="w-3.5 h-3.5 mr-1.5" />Applied</>
+          ) : (
+            <><ExternalLink className="w-3.5 h-3.5 mr-1.5" />Apply</>
+          )}
+        </Button>
+        <Button
+          size="sm"
+          onClick={handleSave}
+          disabled={!!actioning || tracked}
+          variant="outline"
+          className={`flex-1 transition-all ${
+            tracked
+              ? 'border-white/5 text-white/20 cursor-not-allowed hover:bg-transparent'
+              : 'border-white/10 hover:bg-white/5 hover:border-white/20'
+          }`}
+        >
+          {actioning === 'save' ? (
+            <span className="animate-pulse">…</span>
+          ) : tracked && trackedAs === 'wishlist' ? (
+            <><Check className="w-3.5 h-3.5 mr-1.5" />Saved</>
+          ) : (
+            <><Bookmark className="w-3.5 h-3.5 mr-1.5" />Save</>
+          )}
+        </Button>
       </div>
     </div>
   )

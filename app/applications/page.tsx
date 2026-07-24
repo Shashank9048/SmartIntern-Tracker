@@ -31,7 +31,7 @@ import { useApplicationContext } from '@/context/application-context'
 import { toast } from 'sonner'
 import Link from 'next/link'
 
-import { Application, RecommendedJobEntry, MatchStatus } from '@/types'
+import { Application, RecommendedJobEntry, MatchStatus, TrackedJobStatus } from '@/types'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-components for the Recommended feed states
@@ -117,15 +117,14 @@ function EmptyMatchesState() {
         className="text-lg text-muted-foreground font-mono select-none"
         style={{ fontFamily: "'JetBrains Mono', monospace" }}
       >
-        {'> no matches above threshold'}
+        {'> no matches found'}
         <span
           className="inline-block w-[2px] h-[1.1em] bg-muted-foreground align-[-2px] ml-0.5 transition-opacity"
           style={{ opacity: blink ? 1 : 0 }}
         />
       </div>
       <p className="text-sm text-muted-foreground text-center max-w-xs">
-        No jobs cleared the 70% match threshold. Try updating your skills on
-        your resume.
+        Try lowering the score filter, or update your resume with more skills.
       </p>
       <Link href="/resume">
         <Button
@@ -175,15 +174,17 @@ export default function ApplicationsPage() {
   const [feedLoading, setFeedLoading] = useState(true)
   const [triggerFired, setTriggerFired] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Client-side score filter (0 = show all)
+  const [minScoreFilter, setMinScoreFilter] = useState(0)
+  // Track which job_ids have been actioned (applied/saved)
+  const [trackedJobIds, setTrackedJobIds] = useState<Set<string>>(new Set())
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   const fetchRecommended = useCallback(async () => {
     try {
-      const data = await APIClient.get<RecommendedJobEntry[]>(
-        '/api/jobs/recommended',
-        { params: { min_score: 70 } }
-      )
+      // No min_score param — backend defaults to 0 (all jobs), we filter client-side
+      const data = await APIClient.get<RecommendedJobEntry[]>('/api/jobs/recommended')
       setRecommendedJobs(data)
     } catch {
       // Silently fail — keep showing existing data
@@ -403,26 +404,48 @@ export default function ApplicationsPage() {
                   Recommended for you
                 </h2>
                 <p className="text-sm text-muted-foreground mt-0.5">
-                  Jobs scored against your resume · min 70% match
+                  {matchStatus === 'ready' && recommendedJobs.length > 0
+                    ? `${recommendedJobs.filter(j => j.match_score >= minScoreFilter).length} match${recommendedJobs.filter(j => j.match_score >= minScoreFilter).length !== 1 ? 'es' : ''} shown · filter by score below`
+                    : 'Jobs scored against your resume · all scores shown'}
                 </p>
               </div>
-              {matchStatus === 'ready' && recommendedJobs.length > 0 && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="border-white/10 hover:bg-white/5 gap-1.5 text-xs"
-                  onClick={async () => {
-                    setTriggerFired(false)
-                    setFeedLoading(true)
-                    setMatchStatus('computing')
-                    await APIClient.post('/api/jobs/match', {})
-                    pollRef.current = setInterval(checkStatus, 3000)
-                  }}
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  Refresh
-                </Button>
-              )}
+              <div className="flex items-center gap-2">
+                {/* Score filter dropdown */}
+                {matchStatus === 'ready' && recommendedJobs.length > 0 && (
+                  <Select
+                    value={String(minScoreFilter)}
+                    onValueChange={(v) => setMinScoreFilter(Number(v))}
+                  >
+                    <SelectTrigger className="w-36 glass border-white/10 rounded-lg text-xs h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-white/10">
+                      <SelectItem value="0">All scores</SelectItem>
+                      <SelectItem value="50">50%+ match</SelectItem>
+                      <SelectItem value="70">70%+ match</SelectItem>
+                      <SelectItem value="85">85%+ match</SelectItem>
+                    </SelectContent>
+                  </Select>
+                )}
+                {/* Refresh button */}
+                {matchStatus === 'ready' && recommendedJobs.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-white/10 hover:bg-white/5 gap-1.5 text-xs h-8"
+                    onClick={async () => {
+                      setTriggerFired(false)
+                      setFeedLoading(true)
+                      setMatchStatus('computing')
+                      await APIClient.post('/api/jobs/match', {})
+                      pollRef.current = setInterval(checkStatus, 3000)
+                    }}
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Refresh
+                  </Button>
+                )}
+              </div>
             </div>
 
             {/* Feed states */}
@@ -430,23 +453,47 @@ export default function ApplicationsPage() {
               <ComputingState />
             ) : matchStatus === 'no_resume' ? (
               <NoResumeState />
-            ) : recommendedJobs.length === 0 ? (
+            ) : recommendedJobs.filter(j => j.match_score >= minScoreFilter).length === 0 ? (
               <EmptyMatchesState />
             ) : (
               /* Populated: horizontal scroll strip */
               <div className="relative">
-                {/* Fade edge indicators */}
+                {/* Fade edge indicator */}
                 <div className="absolute right-0 top-0 bottom-0 w-16 bg-gradient-to-l from-background to-transparent z-10 pointer-events-none rounded-r-2xl" />
                 <div
                   className="flex gap-4 overflow-x-auto pb-4 pr-8"
                   style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
                 >
-                  {recommendedJobs.map((entry) => (
-                    <JobCard key={entry.job_id} entry={entry} />
-                  ))}
+                  {recommendedJobs
+                    .filter(j => j.match_score >= minScoreFilter)
+                    .map((entry) => (
+                      <JobCard
+                        key={entry.job_id}
+                        entry={entry}
+                        isTracked={trackedJobIds.has(entry.job_id)}
+                        onApply={async (jobId) => {
+                          try {
+                            await APIClient.post('/api/tracked-jobs', { job_id: jobId, status: 'applied' })
+                            setTrackedJobIds(prev => new Set([...prev, jobId]))
+                            toast.success('✓ Tracked as Applied', { duration: 2500 })
+                          } catch (e: any) {
+                            toast.error(e?.message || 'Failed to track application')
+                          }
+                        }}
+                        onSave={async (jobId) => {
+                          try {
+                            await APIClient.post('/api/tracked-jobs', { job_id: jobId, status: 'wishlist' })
+                            setTrackedJobIds(prev => new Set([...prev, jobId]))
+                            toast.success('✓ Saved to Wishlist', { duration: 2500 })
+                          } catch (e: any) {
+                            toast.error(e?.message || 'Failed to save job')
+                          }
+                        }}
+                      />
+                    ))}
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {recommendedJobs.length} match{recommendedJobs.length !== 1 ? 'es' : ''} · scroll to see more →
+                  {recommendedJobs.filter(j => j.match_score >= minScoreFilter).length} match{recommendedJobs.filter(j => j.match_score >= minScoreFilter).length !== 1 ? 'es' : ''} · scroll to see more →
                 </p>
               </div>
             )}

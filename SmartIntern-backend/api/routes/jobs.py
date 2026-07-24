@@ -210,8 +210,8 @@ async def get_match_status(
 
 @router.get("/recommended")
 async def get_recommended_jobs(
-    min_score: int = Query(70, ge=0, le=100, description="Minimum match score (0-100)"),
-    limit: int = Query(20, ge=1, le=50),
+    min_score: int = Query(0, ge=0, le=100, description="Minimum match score filter (0 = return all)"),
+    limit: int = Query(50, ge=1, le=100),
     current_user: str = Depends(get_current_user),
 ):
     """
