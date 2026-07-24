@@ -63,6 +63,7 @@ export interface Application {
   status: ApplicationStatus
   applied_date: string
   interview_date?: string
+  deadline_date?: string
   notes?: string
   job_description?: string
 
@@ -84,6 +85,7 @@ export interface ApplicationCreateRequest {
   status: ApplicationStatus
   applied_date: string
   interview_date?: string
+  deadline_date?: string
   notes?: string
 }
 
@@ -93,6 +95,7 @@ export interface ApplicationUpdateRequest {
   status?: ApplicationStatus
   applied_date?: string
   interview_date?: string
+  deadline_date?: string
   notes?: string
 }
 
@@ -266,7 +269,7 @@ export interface FormErrors {
   [key: string]: string
 }
 
-// Phase 5 — Job Matching Feed Types
+// Phase 5 â€” Job Matching Feed Types
 
 export type MatchStatus = 'no_resume' | 'computing' | 'ready'
 
@@ -292,7 +295,7 @@ export interface MatchStatusResponse {
 }
 
 
-// Phase 6B � Tracked Jobs (feed-sourced kanban)
+// Phase 6B — Tracked Jobs (feed-sourced kanban)
 
 export type TrackedJobStatus =
   | 'wishlist'
@@ -314,4 +317,16 @@ export interface TrackedJobEntry {
     location: string
   }
   job_id: string
+}
+
+// Phase 7 - Notifications
+
+export type NotificationType = 'digest' | 'deadline' | 'interview'
+
+export interface AppNotification {
+  id: string
+  type: NotificationType
+  payload: Record<string, any>
+  read_bool: boolean
+  created_at: string
 }

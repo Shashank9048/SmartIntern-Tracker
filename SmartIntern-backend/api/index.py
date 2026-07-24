@@ -36,7 +36,7 @@ from .models import (
     Application, User, UserAuth, UserSignup, Token, ResumeAnalysis,
     ChatHistory, ApplicationCreate, ApplicationUpdate, Reminder,
     Automation, AutomationLog, AutomationCreate, AutomationUpdate,
-    Resume, Job, UserJobMatch, TrackedJob
+    Resume, Job, UserJobMatch, TrackedJob, Notification
 )
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .ai_utils import parse_resume_json, generate_cold_email_ai, get_career_coach_response, get_interview_tips_ai
@@ -137,7 +137,7 @@ async def lifespan(app: FastAPI):
                 document_models=[
                     Application, User, ResumeAnalysis, ChatHistory,
                     Reminder, Automation, AutomationLog, Resume, Job,
-                    UserJobMatch, TrackedJob
+                    UserJobMatch, TrackedJob, Notification
                 ]
             )
             print("✅ Database Connected")
@@ -158,9 +158,14 @@ async def lifespan(app: FastAPI):
     automation_task = asyncio.create_task(run_automation_scheduler())
     print("✅ Automation Scheduler Started (60s interval)")
 
+    from services.scheduler import NotificationScheduler
+    notif_scheduler = NotificationScheduler()
+    notif_scheduler.start()
+
     yield
 
     automation_task.cancel()
+    notif_scheduler.scheduler.shutdown()
     print("🛑 Automation Scheduler Stopped")
 
 app = FastAPI(lifespan=lifespan)
@@ -1290,3 +1295,6 @@ app.include_router(jobs_router)
 
 from .routes.tracked_jobs import router as tracked_jobs_router
 app.include_router(tracked_jobs_router)
+
+from .routes.notifications import router as notifications_router
+app.include_router(notifications_router)

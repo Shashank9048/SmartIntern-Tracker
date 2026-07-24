@@ -33,6 +33,7 @@ export function AddApplicationModal({ onAdd }: AddApplicationModalProps) {
     status: 'Applied',
     applied_date: new Date().toISOString().split('T')[0],
     interview_date: '',
+    deadline_date: '',
     notes: '',
     job_description: '',
   })
@@ -44,6 +45,7 @@ export function AddApplicationModal({ onAdd }: AddApplicationModalProps) {
     const cleanedData = {
       ...formData,
       interview_date: formData.interview_date ? formData.interview_date : null,
+      deadline_date: formData.deadline_date ? formData.deadline_date : null,
       job_description: formData.job_description ? formData.job_description : null
     }
 
@@ -55,6 +57,7 @@ export function AddApplicationModal({ onAdd }: AddApplicationModalProps) {
       status: 'Applied',
       applied_date: new Date().toISOString().split('T')[0],
       interview_date: '',
+      deadline_date: '',
       notes: '',
       job_description: '',
     })
@@ -141,17 +144,31 @@ export function AddApplicationModal({ onAdd }: AddApplicationModalProps) {
                 required
               />
             </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Deadline (Optional)</label>
+                <Input
+                  type="date"
+                  className="glass border-white/10 rounded-lg"
+                  value={formData.deadline_date}
+                  onChange={(e) =>
+                    setFormData({ ...formData, deadline_date: e.target.value })
+                  }
+                />
+              </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Interview Date (Optional)</label>
-              <Input
-                type="date"
-                className="glass border-white/10 rounded-lg"
-                value={formData.interview_date}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Interview Date (Optional)</label>
+                <Input
+                  type="date"
+                  className="glass border-white/10 rounded-lg"
+                  value={formData.interview_date}
                 onChange={(e) =>
                   setFormData({ ...formData, interview_date: e.target.value })
                 }
               />
+            </div>
             </div>
 
             <div className="space-y-2">

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useAuth } from '@/context/auth-context'
+import { NotificationBell } from '@/components/notifications/notification-bell'
 
 export function Navbar() {
   const { user } = useAuth()
@@ -57,7 +58,8 @@ export function Navbar() {
     <nav className="border-b border-border glass sticky top-0 z-50">
       <div className="px-5 py-3 flex items-center justify-between max-w-full">
         {brand}
-        <div className="flex items-center">
+        <div className="flex items-center gap-4">
+          <NotificationBell />
           {avatarContent}
         </div>
       </div>

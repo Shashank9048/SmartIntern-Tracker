@@ -1,7 +1,8 @@
 import os
 import hashlib
-from fastapi import APIRouter, Depends, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, Query, BackgroundTasks, HTTPException
 from typing import List, Optional
+from pydantic import BaseModel
 from datetime import datetime
 import logging
 
@@ -15,6 +16,14 @@ router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
 
 mock_provider = MockJobsProvider()
 adzuna_provider = AdzunaProvider()
+
+class JobCreate(BaseModel):
+    title: str
+    company: str
+    description: str
+    required_skills: List[str]
+    location: str
+    application_url: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,3 +270,24 @@ async def get_recommended_jobs(
         )
 
     return results
+@router.post("/admin")
+async def create_admin_job(
+    job_data: JobCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Manually create a job posting (Admin).
+    application_url is required for applyable jobs.
+    """
+    # Simple check for admin role can be added here if roles existed
+    new_job = Job(
+        title=job_data.title,
+        company=job_data.company,
+        description=job_data.description,
+        required_skills=job_data.required_skills,
+        location=job_data.location,
+        source="manual",
+        application_url=job_data.application_url
+    )
+    await new_job.insert()
+    return {"message": "Job created successfully", "job_id": str(new_job.id)}

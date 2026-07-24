@@ -33,6 +33,7 @@ export function EditApplicationModal({ application, open, onOpenChange, onUpdate
         status: 'Applied',
         applied_date: '',
         interview_date: '',
+        deadline_date: '',
         notes: '',
     })
 
@@ -44,6 +45,7 @@ export function EditApplicationModal({ application, open, onOpenChange, onUpdate
                 status: application.status || 'Applied',
                 applied_date: application.applied_date ? new Date(application.applied_date).toISOString().split('T')[0] : '',
                 interview_date: application.interview_date ? new Date(application.interview_date).toISOString().split('T')[0] : '',
+                deadline_date: application.deadline_date ? new Date(application.deadline_date).toISOString().split('T')[0] : '',
                 notes: application.notes || '',
             })
         }
@@ -54,7 +56,8 @@ export function EditApplicationModal({ application, open, onOpenChange, onUpdate
         if (application) {
             const cleanedData = {
                 ...formData,
-                interview_date: formData.interview_date ? formData.interview_date : null
+                interview_date: formData.interview_date ? formData.interview_date : null,
+                deadline_date: formData.deadline_date ? formData.deadline_date : null
             }
             onUpdate(application._id, cleanedData)
         }
@@ -133,16 +136,30 @@ export function EditApplicationModal({ application, open, onOpenChange, onUpdate
                         />
                     </div>
 
-                    <div className="space-y-2">
-                        <label className="text-sm font-medium">Interview Date (Optional)</label>
-                        <Input
-                            type="date"
-                            className="glass border-white/10 rounded-lg"
-                            value={formData.interview_date}
-                            onChange={(e) =>
-                                setFormData({ ...formData, interview_date: e.target.value })
-                            }
-                        />
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">Deadline (Optional)</label>
+                            <Input
+                                type="date"
+                                className="glass border-white/10 rounded-lg"
+                                value={formData.deadline_date}
+                                onChange={(e) =>
+                                    setFormData({ ...formData, deadline_date: e.target.value })
+                                }
+                            />
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">Interview Date (Optional)</label>
+                            <Input
+                                type="date"
+                                className="glass border-white/10 rounded-lg"
+                                value={formData.interview_date}
+                                onChange={(e) =>
+                                    setFormData({ ...formData, interview_date: e.target.value })
+                                }
+                            />
+                        </div>
                     </div>
 
                     <div className="space-y-2">

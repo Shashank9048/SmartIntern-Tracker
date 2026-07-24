@@ -22,6 +22,7 @@ class Job(Document):
     location: str
     source: Literal["manual", "adzuna", "jsearch", "mock"] = "mock"
     external_id: Optional[str] = None
+    application_url: Optional[str] = None
     posted_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
@@ -132,6 +133,7 @@ class ApplicationCreate(BaseModel):
     status: str
     applied_date: datetime
     interview_date: Optional[datetime] = None
+    deadline_date: Optional[datetime] = None
     notes: Optional[str] = None
     job_description: Optional[str] = None
 
@@ -141,7 +143,9 @@ class ApplicationUpdate(BaseModel):
     status: Optional[str] = None
     applied_date: Optional[datetime] = None
     interview_date: Optional[datetime] = None
+    deadline_date: Optional[datetime] = None
     notes: Optional[str] = None
+    job_description: Optional[str] = None
 
 class ActionPlanItem(BaseModel):
     priority: str
@@ -276,3 +280,17 @@ class AutomationLog(Document):
 
     class Settings:
         name = "automation_logs"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTIFICATIONS — in-app bell & email tracking (Phase 7)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Notification(Document):
+    user_id: str
+    type: Literal["digest", "deadline", "interview"]
+    payload: dict
+    read_bool: bool = False
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    class Settings:
+        name = "notifications"

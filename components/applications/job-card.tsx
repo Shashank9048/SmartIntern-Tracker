@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { MapPin, Building2, Calendar, ExternalLink, Bookmark, Check } from 'lucide-react'
 import { RecommendedJobEntry } from '@/types'
+import { toast } from 'sonner'
 
 interface JobCardProps {
   entry: RecommendedJobEntry
@@ -111,8 +112,22 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
 
   const handleApply = async () => {
     if (actioning || tracked) return
+
+    if (!job.application_url) {
+      toast.error('No application link for this listing', {
+        style: {
+          background: '#09090b',
+          border: '1px solid rgba(244, 63, 94, 0.2)', // rose-500/20
+          color: '#f43f5e',
+          fontFamily: "'JetBrains Mono', monospace",
+        },
+      })
+      return
+    }
+
     setActioning('apply')
     try {
+      window.open(job.application_url, '_blank')
       onApply?.(job_id)
       setTracked(true)
       setTrackedAs('applied')

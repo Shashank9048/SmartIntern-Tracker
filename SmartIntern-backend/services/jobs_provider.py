@@ -35,7 +35,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Join Google's engineering team as an intern. Work on core infrastructure, Search, or Cloud products.",
                 "required_skills": ["Python", "C++", "Java", "Data Structures", "Algorithms"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Frontend Developer Intern",
@@ -43,7 +44,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Help build seamless user experiences for millions of Swiggy users. Work with React and Redux.",
                 "required_skills": ["React", "JavaScript", "HTML", "CSS", "Redux"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Backend Engineering Intern",
@@ -51,7 +53,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Gurgaon, India",
                 "description": "Scale Zomato's backend systems. Experience with microservices and caching is a plus.",
                 "required_skills": ["Node.js", "Python", "MongoDB", "Redis", "AWS"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Data Science Intern",
@@ -59,7 +62,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Analyze large datasets to improve e-commerce recommendation systems and supply chain logistics.",
                 "required_skills": ["Python", "Pandas", "Machine Learning", "SQL", "Scikit-Learn"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Full Stack Intern",
@@ -67,7 +71,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Remote",
                 "description": "Work on building robust payment gateways and modern dashboards for merchants.",
                 "required_skills": ["React", "Node.js", "TypeScript", "PostgreSQL"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "SDE Intern (Entry Level)",
@@ -75,7 +80,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Hyderabad, India",
                 "description": "Design and build scalable services for AWS. Strong problem-solving skills required.",
                 "required_skills": ["Java", "C++", "System Design", "AWS"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "React Native Intern",
@@ -83,7 +89,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Contribute to building the most premium credit card payment app in India.",
                 "required_skills": ["React Native", "TypeScript", "Mobile Development"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Machine Learning Intern",
@@ -91,7 +98,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Optimize routing algorithms and pricing models using advanced machine learning techniques.",
                 "required_skills": ["Python", "TensorFlow", "PyTorch", "Algorithms"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "DevOps Intern",
@@ -99,7 +107,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Help manage highly available infrastructure and deployment pipelines.",
                 "required_skills": ["Linux", "Docker", "Kubernetes", "CI/CD", "AWS"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Product Analyst Intern",
@@ -107,7 +116,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Noida, India",
                 "description": "Analyze user behavior and provide actionable insights for product development.",
                 "required_skills": ["SQL", "Excel", "Data Analysis", "Python"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "UI/UX Design Intern",
@@ -115,7 +125,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Gurgaon, India",
                 "description": "Design intuitive travel booking experiences for millions of users.",
                 "required_skills": ["Figma", "UI/UX", "Prototyping", "User Research"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Cloud Engineering Intern",
@@ -123,7 +134,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Chennai, India",
                 "description": "Learn to manage and scale cloud resources efficiently.",
                 "required_skills": ["AWS", "Azure", "Linux", "Networking"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Cybersecurity Intern",
@@ -131,7 +143,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Remote",
                 "description": "Assist in vulnerability assessments and ensuring platform security.",
                 "required_skills": ["Network Security", "Ethical Hacking", "Python"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Go Developer Intern",
@@ -139,7 +152,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Build high-throughput microservices using Golang.",
                 "required_skills": ["Golang", "Microservices", "gRPC", "Docker"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Android Developer Intern",
@@ -147,7 +161,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Build features for India's largest vernacular social network.",
                 "required_skills": ["Android", "Kotlin", "Java", "MVVM"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "iOS Developer Intern",
@@ -155,7 +170,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Mumbai, India",
                 "description": "Create engaging experiences for fantasy sports enthusiasts on iOS.",
                 "required_skills": ["Swift", "iOS", "Xcode", "UIKit"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "SDE-1 (Fresher)",
@@ -163,7 +179,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Hyderabad, India",
                 "description": "Join as an entry-level SDE working on Azure, Office, or Windows ecosystems.",
                 "required_skills": ["C#", "C++", "System Design", "Algorithms"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Junior Python Developer",
@@ -171,7 +188,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Build scalable financial and investing tools. Fast-paced startup environment.",
                 "required_skills": ["Python", "Django", "PostgreSQL", "REST APIs"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Web Development Intern",
@@ -179,7 +197,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Bangalore, India",
                 "description": "Contribute to the world's leading API platform.",
                 "required_skills": ["JavaScript", "React", "Node.js", "API Design"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             },
             {
                 "title": "Game Developer Intern",
@@ -187,7 +206,8 @@ class MockJobsProvider(JobsProvider):
                 "location": "Remote",
                 "description": "Develop and optimize mobile games for the MPL platform.",
                 "required_skills": ["Unity", "C#", "Game Design", "C++"],
-                "source": "mock"
+                "source": "mock",
+                "application_url": "https://example.com/apply"
             }
         ]
 
@@ -206,6 +226,7 @@ class MockJobsProvider(JobsProvider):
                 location=item["location"],
                 source=item["source"],
                 external_id=f"mock-{i}",
+                application_url=item["application_url"],
                 posted_at=posted_time
             )
             jobs.append(job)
@@ -267,10 +288,66 @@ class AdzunaProvider(JobsProvider):
                         location=result.get("location", {}).get("display_name", ""),
                         source="adzuna",
                         external_id=str(result.get("id", "")),
+                        application_url=result.get("redirect_url", ""),
                         posted_at=datetime.strptime(result.get("created"), "%Y-%m-%dT%H:%M:%SZ") if result.get("created") else datetime.now()
                     )
                     jobs.append(job)
         except Exception as e:
             logger.error(f"Error fetching jobs from Adzuna: {e}")
+
+        return jobs
+
+
+class JSearchProvider(JobsProvider):
+    """
+    Calls JSearch on RapidAPI.
+    Uses RAPIDAPI_KEY.
+    """
+    def __init__(self):
+        self.api_key = os.getenv("RAPIDAPI_KEY")
+        self.base_url = "https://jsearch.p.rapidapi.com/search"
+
+    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 20) -> List[Job]:
+        if not self.api_key:
+            logger.warning("RAPIDAPI_KEY is missing. Returning empty jobs from JSearchProvider.")
+            return []
+
+        search_query = query
+        if location:
+            search_query += f" in {location}"
+
+        querystring = {"query": search_query, "num_pages": "1"}
+        headers = {
+            "X-RapidAPI-Key": self.api_key,
+            "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
+        }
+
+        jobs = []
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(self.base_url, headers=headers, params=querystring)
+                response.raise_for_status()
+                data = response.json()
+
+                for result in data.get("data", [])[:limit]:
+                    skills = []
+                    reqs = result.get("job_required_skills")
+                    if isinstance(reqs, list):
+                        skills = reqs
+
+                    job = Job(
+                        title=result.get("job_title", ""),
+                        company=result.get("employer_name", ""),
+                        description=result.get("job_description", ""),
+                        required_skills=skills,
+                        location=f'{result.get("job_city", "")}, {result.get("job_country", "")}'.strip(", "),
+                        source="jsearch",
+                        external_id=result.get("job_id", ""),
+                        application_url=result.get("job_apply_link", ""),
+                        posted_at=datetime.strptime(result.get("job_posted_at_datetime_utc"), "%Y-%m-%dT%H:%M:%S.%fZ") if result.get("job_posted_at_datetime_utc") else datetime.now()
+                    )
+                    jobs.append(job)
+        except Exception as e:
+            logger.error(f"Error fetching jobs from JSearch: {e}")
 
         return jobs
