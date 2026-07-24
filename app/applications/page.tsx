@@ -5,6 +5,7 @@ import { APIClient } from '@/lib/api-client'
 import { AddApplicationModal } from '@/components/applications/add-application-modal'
 import { EditApplicationModal } from '@/components/applications/edit-application-modal'
 import { ApplicationCard } from '@/components/applications/application-card'
+import { JobCard } from '@/components/applications/job-card'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -14,35 +15,264 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
-import { Search, LayoutGrid, List } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import {
+  Search,
+  LayoutGrid,
+  List,
+  Zap,
+  RefreshCw,
+  Sparkles,
+  FolderOpen,
+  ChevronRight,
+} from 'lucide-react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useAuth } from '@/context/auth-context'
 import { useApplicationContext } from '@/context/application-context'
 import { toast } from 'sonner'
+import Link from 'next/link'
 
-import { Application } from '@/types'
+import { Application, RecommendedJobEntry, MatchStatus } from '@/types'
 
-// Removed mockApplications
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components for the Recommended feed states
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ComputingState() {
+  const [dots, setDots] = useState('_')
+
+  useEffect(() => {
+    const frames = ['_', '__', '___', '']
+    let i = 0
+    const id = setInterval(() => {
+      i = (i + 1) % frames.length
+      setDots(frames[i])
+    }, 500)
+    return () => clearInterval(id)
+  }, [])
+
+  return (
+    <div className="border border-dashed border-white/20 rounded-2xl py-16 px-8 flex flex-col items-center justify-center gap-4 bg-white/[0.02]">
+      <div
+        className="text-lg text-amber-400/80 font-mono select-none"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        {'> computing your matches'}
+        <span className="text-amber-400">{dots}</span>
+      </div>
+      <p className="text-sm text-muted-foreground text-center max-w-xs">
+        We're scoring jobs against your resume in the background. This usually
+        takes a few seconds.
+      </p>
+    </div>
+  )
+}
+
+function NoResumeState() {
+  const [blink, setBlink] = useState(true)
+
+  useEffect(() => {
+    const id = setInterval(() => setBlink((b) => !b), 600)
+    return () => clearInterval(id)
+  }, [])
+
+  return (
+    <div className="border border-dashed border-white/20 rounded-2xl py-16 px-8 flex flex-col items-center justify-center gap-4 bg-white/[0.02]">
+      <div
+        className="text-lg text-muted-foreground font-mono select-none"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        {'> no resume found'}
+        <span
+          className="inline-block w-[2px] h-[1.1em] bg-primary align-[-2px] ml-0.5 transition-opacity"
+          style={{ opacity: blink ? 1 : 0 }}
+        />
+      </div>
+      <p className="text-sm text-muted-foreground text-center max-w-xs">
+        Upload your resume to start getting personalised job recommendations.
+      </p>
+      <Link href="/resume">
+        <Button
+          size="sm"
+          className="bg-primary/20 text-primary hover:bg-primary/30 border border-primary/30 gap-1.5"
+        >
+          <ChevronRight className="w-3.5 h-3.5" />
+          Go to Resume page
+        </Button>
+      </Link>
+    </div>
+  )
+}
+
+function EmptyMatchesState() {
+  const [blink, setBlink] = useState(true)
+
+  useEffect(() => {
+    const id = setInterval(() => setBlink((b) => !b), 600)
+    return () => clearInterval(id)
+  }, [])
+
+  return (
+    <div className="border border-dashed border-white/20 rounded-2xl py-16 px-8 flex flex-col items-center justify-center gap-4 bg-white/[0.02]">
+      <div
+        className="text-lg text-muted-foreground font-mono select-none"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        {'> no matches above threshold'}
+        <span
+          className="inline-block w-[2px] h-[1.1em] bg-muted-foreground align-[-2px] ml-0.5 transition-opacity"
+          style={{ opacity: blink ? 1 : 0 }}
+        />
+      </div>
+      <p className="text-sm text-muted-foreground text-center max-w-xs">
+        No jobs cleared the 70% match threshold. Try updating your skills on
+        your resume.
+      </p>
+      <Link href="/resume">
+        <Button
+          size="sm"
+          variant="outline"
+          className="border-white/10 gap-1.5 hover:bg-white/5"
+        >
+          <ChevronRight className="w-3.5 h-3.5" />
+          Update Resume
+        </Button>
+      </Link>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main page
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Tab = 'recommended' | 'applications'
 
 export default function ApplicationsPage() {
   const { user } = useAuth()
-  const { applications, loading, error, addApplication, updateApplication, deleteApplication } = useApplicationContext()
+  const {
+    applications,
+    loading,
+    addApplication,
+    updateApplication,
+    deleteApplication,
+    refetch,
+  } = useApplicationContext()
+
+  // ── Tab state ──────────────────────────────────────────────────────────────
+  const [activeTab, setActiveTab] = useState<Tab>('recommended')
+
+  // ── My Applications state ─────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [viewMode, setViewMode] = useState<'grid' | 'kanban'>('grid')
   const [editingApp, setEditingApp] = useState<Application | null>(null)
+  const [scoring, setScoring] = useState(false)
+  const autoScoredRef = useRef(false)
+
+  // ── Recommended feed state ─────────────────────────────────────────────────
+  const [matchStatus, setMatchStatus] = useState<MatchStatus>('computing')
+  const [recommendedJobs, setRecommendedJobs] = useState<RecommendedJobEntry[]>([])
+  const [feedLoading, setFeedLoading] = useState(true)
+  const [triggerFired, setTriggerFired] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  const fetchRecommended = useCallback(async () => {
+    try {
+      const data = await APIClient.get<RecommendedJobEntry[]>(
+        '/api/jobs/recommended',
+        { params: { min_score: 70 } }
+      )
+      setRecommendedJobs(data)
+    } catch {
+      // Silently fail — keep showing existing data
+    }
+  }, [])
+
+  const triggerAndPoll = useCallback(async () => {
+    if (triggerFired) return
+    setTriggerFired(true)
+    try {
+      await APIClient.post('/api/jobs/match', {})
+    } catch {
+      // Non-fatal — status poll will catch the result
+    }
+  }, [triggerFired])
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const res = await APIClient.get<{
+        status: MatchStatus
+        match_count: number
+      }>('/api/jobs/match/status')
+
+      setMatchStatus(res.status)
+
+      if (res.status === 'computing' && !triggerFired) {
+        // Kick off the batch match if not already triggered
+        triggerAndPoll()
+        return
+      }
+
+      if (res.status === 'ready') {
+        // Stop polling, load results
+        if (pollRef.current) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+        }
+        await fetchRecommended()
+        setFeedLoading(false)
+        return
+      }
+
+      if (res.status === 'no_resume') {
+        if (pollRef.current) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+        }
+        setFeedLoading(false)
+      }
+    } catch {
+      setFeedLoading(false)
+    }
+  }, [fetchRecommended, triggerAndPoll, triggerFired])
+
+  // Start status polling on mount
+  useEffect(() => {
+    checkStatus() // immediate first check
+    pollRef.current = setInterval(checkStatus, 3000)
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [checkStatus])
+
+  // Auto-score pending application cards once user + apps load
+  useEffect(() => {
+    const pendingCount = applications.filter(
+      (a: Application) => a.ai_match_score == null
+    ).length
+    if (
+      !loading &&
+      !autoScoredRef.current &&
+      pendingCount > 0 &&
+      (user as any)?.resume_text
+    ) {
+      autoScoredRef.current = true
+      handleScoreAll(true)
+    }
+  }, [applications, loading, user])
+
+  // ── Application handlers ───────────────────────────────────────────────────
 
   const filteredApplications = applications.filter((app: Application) => {
-    const company = app.company_name || '';
-    const role = app.role || '';
-
+    const company = app.company_name || ''
+    const role = app.role || ''
     const matchesSearch =
       company.toLowerCase().includes(searchTerm.toLowerCase()) ||
       role.toLowerCase().includes(searchTerm.toLowerCase())
-
     const matchesStatus =
       statusFilter === 'all' || app.status === statusFilter
-
     return matchesSearch && matchesStatus
   })
 
@@ -60,13 +290,11 @@ export default function ApplicationsPage() {
       await updateApplication(id, data)
       toast.success('Application updated successfully')
       setEditingApp(null)
-    } catch {
-    }
+    } catch {}
   }
 
   const handleFollowUp = async (app: Application) => {
     try {
-      // Create a follow-up automation scheduled 7 days from now
       const scheduledAt = new Date()
       scheduledAt.setDate(scheduledAt.getDate() + 7)
       await APIClient.post('/api/automations', {
@@ -77,7 +305,7 @@ export default function ApplicationsPage() {
         ai_prep_enabled: false,
       })
       toast.success(`Follow-up reminder set for ${app.company_name}!`)
-    } catch (error) {
+    } catch {
       toast.error('Failed to create follow-up reminder')
     }
   }
@@ -86,144 +314,318 @@ export default function ApplicationsPage() {
     try {
       await deleteApplication(id)
       toast.success('Application deleted successfully')
-    } catch {
+    } catch {}
+  }
+
+  const handleScoreAll = async (silent = false) => {
+    if (scoring) return
+    setScoring(true)
+    if (!silent) toast.loading('Scoring applications with AI…', { id: 'score-all' })
+    try {
+      const result: any = await APIClient.post('/api/applications/score-all', {})
+      if (!silent) {
+        toast.success(`Scored ${result.scored} application(s) with AI!`, { id: 'score-all' })
+      }
+      if (result.scored > 0) {
+        await refetch?.()
+      }
+    } catch (err: any) {
+      if (!silent) toast.error(err?.message || 'Scoring failed', { id: 'score-all' })
+    } finally {
+      setScoring(false)
     }
   }
+
+  const pendingAICount = applications.filter(
+    (a: Application) => a.ai_match_score == null
+  ).length
+  const hasResume = !!(user as any)?.resume_text
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <AppLayout>
       <div className="space-y-6">
-        {/* Header */}
+        {/* Page header */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold mb-2">Applications</h1>
             <p className="text-muted-foreground">
-              Manage all your internship applications
+              Discover recommended roles and manage your applications
             </p>
           </div>
-          <AddApplicationModal onAdd={handleAddApplication} />
+          {activeTab === 'applications' && (
+            <AddApplicationModal onAdd={handleAddApplication} />
+          )}
         </div>
 
-        {/* Filters */}
-        <div className="flex flex-col md:flex-row gap-4">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              type="text"
-              placeholder="Search applications..."
-              className="glass pl-10 border-white/10 rounded-lg"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="w-full md:w-48 glass border-white/10 rounded-lg">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="bg-card border-white/10">
-              <SelectItem value="all">All Status</SelectItem>
-              <SelectItem value="Applied">Applied</SelectItem>
-              <SelectItem value="Interview">Interview</SelectItem>
-              <SelectItem value="Selected">Selected</SelectItem>
-              <SelectItem value="Rejected">Rejected</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <div className="flex gap-2">
-            <Button
-              variant={viewMode === 'grid' ? 'default' : 'outline'}
-              size="icon"
-              onClick={() => setViewMode('grid')}
-              className={viewMode === 'grid' ? 'bg-primary text-white' : 'border-white/10'}
-            >
-              <LayoutGrid className="w-4 h-4" />
-            </Button>
-            <Button
-              variant={viewMode === 'kanban' ? 'default' : 'outline'}
-              size="icon"
-              onClick={() => setViewMode('kanban')}
-              className={viewMode === 'kanban' ? 'bg-primary text-white' : 'border-white/10'}
-            >
-              <List className="w-4 h-4" />
-            </Button>
-          </div>
+        {/* ── Tab switcher ──────────────────────────────────────────────── */}
+        <div className="flex gap-1 p-1 glass rounded-xl w-fit border border-white/10">
+          <button
+            onClick={() => setActiveTab('recommended')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === 'recommended'
+                ? 'bg-amber-500/20 text-amber-400 border border-amber-400/20 shadow-sm shadow-amber-400/10'
+                : 'text-muted-foreground hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Sparkles className="w-4 h-4" />
+            Recommended
+          </button>
+          <button
+            onClick={() => setActiveTab('applications')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === 'applications'
+                ? 'bg-primary/20 text-primary border border-primary/20 shadow-sm shadow-primary/10'
+                : 'text-muted-foreground hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <FolderOpen className="w-4 h-4" />
+            My Applications
+            {applications.length > 0 && (
+              <span className="text-xs bg-white/10 px-1.5 py-0.5 rounded-full">
+                {applications.length}
+              </span>
+            )}
+          </button>
         </div>
 
-        {/* Applications Grid / Kanban */}
-        {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {[1, 2, 3, 4, 5, 6].map((n) => (
-              <div key={n} className="glass rounded-xl p-6 h-[220px] animate-pulse flex flex-col">
-                <div className="h-6 bg-white/10 rounded w-1/2 mb-2"></div>
-                <div className="h-4 bg-white/10 rounded w-1/3 mb-6"></div>
-                <div className="h-6 bg-white/10 rounded w-1/4 mb-4"></div>
-                <div className="h-2 bg-white/10 rounded-full w-full mt-auto mb-6"></div>
-                <div className="flex gap-2">
-                  <div className="h-8 bg-white/10 rounded flex-1"></div>
-                  <div className="h-8 bg-white/10 rounded flex-1"></div>
-                </div>
+        {/* ══════════════════════════════════════════════════════════════════ */}
+        {/* TAB: RECOMMENDED                                                  */}
+        {/* ══════════════════════════════════════════════════════════════════ */}
+        {activeTab === 'recommended' && (
+          <div className="space-y-4">
+            {/* Section header */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  Recommended for you
+                </h2>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  Jobs scored against your resume · min 70% match
+                </p>
               </div>
-            ))}
-          </div>
-        ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredApplications.map((app: Application) => (
-              <ApplicationCard
-                key={app._id}
-                id={app._id}
-                company_name={app.company_name}
-                role={app.role}
-                status={app.status}
-                applied_date={app.applied_date}
-                interview_date={app.interview_date}
-                matchScore={app.ai_match_score ?? undefined}
-                onDelete={() => handleDeleteApplication(app._id)}
-                onEdit={() => setEditingApp(app)}
-                onFollowUp={() => handleFollowUp(app)}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="flex gap-6 overflow-x-auto pb-4 custom-scrollbar">
-            {['Applied', 'Interview', 'Selected', 'Rejected'].map((statusOption) => (
-              <div key={statusOption} className="flex-1 min-w-[300px] bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col gap-4">
-                <div className="flex items-center justify-between pb-2 border-b border-white/10">
-                  <h3 className="font-semibold text-sm">{statusOption}</h3>
-                  <span className="text-xs bg-white/10 px-2 py-1 rounded-full text-muted-foreground">
-                    {filteredApplications.filter(a => a.status === statusOption).length}
-                  </span>
+              {matchStatus === 'ready' && recommendedJobs.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-white/10 hover:bg-white/5 gap-1.5 text-xs"
+                  onClick={async () => {
+                    setTriggerFired(false)
+                    setFeedLoading(true)
+                    setMatchStatus('computing')
+                    await APIClient.post('/api/jobs/match', {})
+                    pollRef.current = setInterval(checkStatus, 3000)
+                  }}
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Refresh
+                </Button>
+              )}
+            </div>
+
+            {/* Feed states */}
+            {feedLoading || matchStatus === 'computing' ? (
+              <ComputingState />
+            ) : matchStatus === 'no_resume' ? (
+              <NoResumeState />
+            ) : recommendedJobs.length === 0 ? (
+              <EmptyMatchesState />
+            ) : (
+              /* Populated: horizontal scroll strip */
+              <div className="relative">
+                {/* Fade edge indicators */}
+                <div className="absolute right-0 top-0 bottom-0 w-16 bg-gradient-to-l from-background to-transparent z-10 pointer-events-none rounded-r-2xl" />
+                <div
+                  className="flex gap-4 overflow-x-auto pb-4 pr-8"
+                  style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
+                >
+                  {recommendedJobs.map((entry) => (
+                    <JobCard key={entry.job_id} entry={entry} />
+                  ))}
                 </div>
-                <div className="flex flex-col gap-4">
-                  {filteredApplications
-                    .filter((app: Application) => app.status === statusOption)
-                    .map((app: Application) => (
-                      <ApplicationCard
-                        key={app._id}
-                        id={app._id}
-                        company_name={app.company_name}
-                        role={app.role}
-                        status={app.status}
-                        applied_date={app.applied_date}
-                        interview_date={app.interview_date}
-                        matchScore={app.ai_match_score ?? undefined}
-                        onDelete={() => handleDeleteApplication(app._id)}
-                        onEdit={() => setEditingApp(app)}
-                        onFollowUp={() => handleFollowUp(app)}
-                      />
-                    ))}
-                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {recommendedJobs.length} match{recommendedJobs.length !== 1 ? 'es' : ''} · scroll to see more →
+                </p>
               </div>
-            ))}
+            )}
           </div>
         )}
 
-        {filteredApplications.length === 0 && (
-          <div className="text-center py-12">
-            <p className="text-muted-foreground mb-4">
-              No applications added yet. Start tracking your internships 🚀
-            </p>
-            <AddApplicationModal onAdd={handleAddApplication} />
+        {/* ══════════════════════════════════════════════════════════════════ */}
+        {/* TAB: MY APPLICATIONS                                              */}
+        {/* Phase 6: Kanban board will be added inside this tab panel         */}
+        {/* ══════════════════════════════════════════════════════════════════ */}
+        {activeTab === 'applications' && (
+          <div className="space-y-6">
+            {/* Score All Banner */}
+            {pendingAICount > 0 && hasResume && (
+              <div className="flex items-center justify-between gap-4 glass rounded-xl px-5 py-3 border border-primary/20 bg-primary/5">
+                <div className="flex items-center gap-3">
+                  <Zap className="w-5 h-5 text-primary shrink-0" />
+                  <p className="text-sm">
+                    <span className="font-semibold text-white">
+                      {pendingAICount} application{pendingAICount > 1 ? 's' : ''}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {' '}{pendingAICount > 1 ? 'are' : 'is'} missing an AI match score.
+                    </span>
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => handleScoreAll(false)}
+                  disabled={scoring}
+                  className="shrink-0 bg-primary/20 text-primary hover:bg-primary/30 border border-primary/30"
+                >
+                  {scoring ? (
+                    <><RefreshCw className="w-3 h-3 mr-1.5 animate-spin" /> Scoring…</>
+                  ) : (
+                    <><Zap className="w-3 h-3 mr-1.5" /> Score with AI</>
+                  )}
+                </Button>
+              </div>
+            )}
+
+            {/* No-resume hint */}
+            {pendingAICount > 0 && !hasResume && (
+              <div className="flex items-center gap-3 glass rounded-xl px-5 py-3 border border-yellow-500/20 bg-yellow-500/5">
+                <Zap className="w-5 h-5 text-yellow-400 shrink-0" />
+                <p className="text-sm text-muted-foreground">
+                  <span className="text-yellow-400 font-medium">Upload your resume</span>{' '}
+                  on the Resume page to get AI match scores for your applications.
+                </p>
+              </div>
+            )}
+
+            {/* Filters */}
+            <div className="flex flex-col md:flex-row gap-4">
+              <div className="flex-1 relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder="Search applications..."
+                  className="glass pl-10 border-white/10 rounded-lg"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+              </div>
+
+              <Select value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectTrigger className="w-full md:w-48 glass border-white/10 rounded-lg">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-white/10">
+                  <SelectItem value="all">All Status</SelectItem>
+                  <SelectItem value="Applied">Applied</SelectItem>
+                  <SelectItem value="Interview">Interview</SelectItem>
+                  <SelectItem value="Selected">Selected</SelectItem>
+                  <SelectItem value="Rejected">Rejected</SelectItem>
+                </SelectContent>
+              </Select>
+
+              <div className="flex gap-2">
+                <Button
+                  variant={viewMode === 'grid' ? 'default' : 'outline'}
+                  size="icon"
+                  onClick={() => setViewMode('grid')}
+                  className={viewMode === 'grid' ? 'bg-primary text-white' : 'border-white/10'}
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                </Button>
+                <Button
+                  variant={viewMode === 'kanban' ? 'default' : 'outline'}
+                  size="icon"
+                  onClick={() => setViewMode('kanban')}
+                  className={viewMode === 'kanban' ? 'bg-primary text-white' : 'border-white/10'}
+                >
+                  <List className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+
+            {/* Applications Grid / Kanban */}
+            {/* Phase 6 note: Kanban board component will be inserted in this block */}
+            {loading ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {[1, 2, 3, 4, 5, 6].map((n) => (
+                  <div key={n} className="glass rounded-xl p-6 h-[220px] animate-pulse flex flex-col">
+                    <div className="h-6 bg-white/10 rounded w-1/2 mb-2" />
+                    <div className="h-4 bg-white/10 rounded w-1/3 mb-6" />
+                    <div className="h-6 bg-white/10 rounded w-1/4 mb-4" />
+                    <div className="h-2 bg-white/10 rounded-full w-full mt-auto mb-6" />
+                    <div className="flex gap-2">
+                      <div className="h-8 bg-white/10 rounded flex-1" />
+                      <div className="h-8 bg-white/10 rounded flex-1" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : viewMode === 'grid' ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {filteredApplications.map((app: Application) => (
+                  <ApplicationCard
+                    key={app._id}
+                    id={app._id}
+                    company_name={app.company_name}
+                    role={app.role}
+                    status={app.status}
+                    applied_date={app.applied_date}
+                    interview_date={app.interview_date}
+                    matchScore={app.ai_match_score ?? undefined}
+                    onDelete={() => handleDeleteApplication(app._id)}
+                    onEdit={() => setEditingApp(app)}
+                    onFollowUp={() => handleFollowUp(app)}
+                  />
+                ))}
+              </div>
+            ) : (
+              /* Phase 6: KanbanBoard component goes here, replacing this column layout */
+              <div className="flex gap-6 overflow-x-auto pb-4 custom-scrollbar">
+                {['Applied', 'Interview', 'Selected', 'Rejected'].map((statusOption) => (
+                  <div
+                    key={statusOption}
+                    className="flex-1 min-w-[300px] bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col gap-4"
+                  >
+                    <div className="flex items-center justify-between pb-2 border-b border-white/10">
+                      <h3 className="font-semibold text-sm">{statusOption}</h3>
+                      <span className="text-xs bg-white/10 px-2 py-1 rounded-full text-muted-foreground">
+                        {filteredApplications.filter((a) => a.status === statusOption).length}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-4">
+                      {filteredApplications
+                        .filter((app: Application) => app.status === statusOption)
+                        .map((app: Application) => (
+                          <ApplicationCard
+                            key={app._id}
+                            id={app._id}
+                            company_name={app.company_name}
+                            role={app.role}
+                            status={app.status}
+                            applied_date={app.applied_date}
+                            interview_date={app.interview_date}
+                            matchScore={app.ai_match_score ?? undefined}
+                            onDelete={() => handleDeleteApplication(app._id)}
+                            onEdit={() => setEditingApp(app)}
+                            onFollowUp={() => handleFollowUp(app)}
+                          />
+                        ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {filteredApplications.length === 0 && !loading && (
+              <div className="text-center py-12">
+                <p className="text-muted-foreground mb-4">
+                  No applications added yet. Start tracking your internships 🚀
+                </p>
+                <AddApplicationModal onAdd={handleAddApplication} />
+              </div>
+            )}
           </div>
         )}
       </div>

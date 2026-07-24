@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie, PydanticObjectId
@@ -8,9 +8,16 @@ from typing import Optional, List
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+import sys
 import os
 import asyncio
+import hashlib
 from dotenv import load_dotenv
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 # Robust .env loading
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +35,8 @@ else:
 from .models import (
     Application, User, UserAuth, UserSignup, Token, ResumeAnalysis,
     ChatHistory, ApplicationCreate, ApplicationUpdate, Reminder,
-    Automation, AutomationLog, AutomationCreate, AutomationUpdate
+    Automation, AutomationLog, AutomationCreate, AutomationUpdate,
+    Resume, Job, UserJobMatch
 )
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .ai_utils import parse_resume_json, generate_cold_email_ai, get_career_coach_response, get_interview_tips_ai
@@ -46,10 +54,15 @@ async def run_automation_scheduler():
     while True:
         try:
             now = datetime.now()
-            due = await Automation.find(
-                Automation.status == "active",
-                Automation.scheduled_at <= now,
-            ).to_list()
+            due = []
+            try:
+                due = await Automation.find(
+                    Automation.status == "active",
+                    Automation.scheduled_at <= now,
+                ).to_list()
+            except Exception as e:
+                # DB not initialized or query failed
+                pass
 
             for automation in due:
                 try:
@@ -117,15 +130,20 @@ async def run_automation_scheduler():
 async def lifespan(app: FastAPI):
     mongo_url = os.environ.get("MONGODB_URL")
     if mongo_url:
-        client = AsyncIOMotorClient(mongo_url)
-        await init_beanie(
-            database=client["smart_intern_tracker"],
-            document_models=[
-                Application, User, ResumeAnalysis, ChatHistory,
-                Reminder, Automation, AutomationLog
-            ]
-        )
-        print("✅ Database Connected")
+        try:
+            client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+            await init_beanie(
+                database=client["smart_intern_tracker"],
+                document_models=[
+                    Application, User, ResumeAnalysis, ChatHistory,
+                    Reminder, Automation, AutomationLog, Resume, Job,
+                    UserJobMatch
+                ]
+            )
+            print("✅ Database Connected")
+        except Exception as e:
+            print(f"⚠️ Database Connection Error: {e}")
+            print("⚠️ Server started, but MongoDB connection failed. Please check network/MONGODB_URL.")
     else:
         print("⚠️ WARNING: MONGODB_URL not found")
 
@@ -217,6 +235,21 @@ async def login(user_data: UserAuth):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/auth/me")
+async def auth_me(current_user: str = Depends(get_current_user)):
+    """Spec-required alias for GET /user/me — returns the authenticated user's profile."""
+    user = await User.find_one(User.email == current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+@app.post("/auth/logout")
+async def logout(current_user: str = Depends(get_current_user)):
+    """JWT is stateless — actual token invalidation is client-side.
+    This endpoint exists so the frontend can call it to ack logout
+    (useful for audit logging or future server-side token blocklist)."""
+    return {"message": "Logged out successfully", "email": current_user}
 
 # ─── FORGOT PASSWORD (OTP-based) ─────────────────────────────────────────────
 
@@ -390,6 +423,14 @@ async def delete_account(current_user: str = Depends(get_current_user)):
         await ResumeAnalysis.find(ResumeAnalysis.user_email == user_email).delete()
     except Exception as e:
         print(f"⚠️ Deleting resume analyses error: {e}")
+
+    # Delete structured Resume document (Phase 2)
+    try:
+        resume_doc = await Resume.find_one(Resume.user_id == user_email)
+        if resume_doc:
+            await resume_doc.delete()
+    except Exception as e:
+        print(f"⚠️ Deleting resume doc error: {e}")
 
     # Delete avatar file from disk if it's a local file
     try:
@@ -664,10 +705,17 @@ async def add_app(data: AppCreateInline, current_user: str = Depends(get_current
     ai_missing = []
     ai_suggestions_list = []
 
-    if user.resume_text:
+    resume_text_to_use = None
+    resume_doc = await Resume.find_one(Resume.user_id == current_user)
+    if resume_doc and resume_doc.raw_text:
+        resume_text_to_use = resume_doc.raw_text
+    elif user.resume_text:
+        resume_text_to_use = user.resume_text
+
+    if resume_text_to_use:
         try:
             jd = data.job_description or f"{data.role} at {data.company_name}"
-            result = await analyze_resume_match(user.resume_text, jd)
+            result = await analyze_resume_match(resume_text_to_use, jd)
             ai_score = result.get("overall_match_score") or result.get("match_score", 0)
             ai_alignment = result.get("experience_alignment", "Low")
             ai_summary_text = result.get("summary", "")
@@ -696,6 +744,47 @@ async def add_app(data: AppCreateInline, current_user: str = Depends(get_current
     await new_app.insert()
     return new_app
 
+
+@app.post("/api/applications/score-all")
+async def api_score_all_applications(current_user: str = Depends(get_current_user)):
+    user = await User.find_one(User.email == current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    resume_text_to_use = None
+    resume_doc = await Resume.find_one(Resume.user_id == current_user)
+    if resume_doc and resume_doc.raw_text:
+        resume_text_to_use = resume_doc.raw_text
+    elif user.resume_text:
+        resume_text_to_use = user.resume_text
+
+    if not resume_text_to_use:
+        return {"scored": 0, "message": "No resume available for scoring"}
+
+    unscored_apps = await Application.find(
+        Application.user_id == current_user,
+        Application.ai_match_score == None
+    ).to_list()
+
+    count = 0
+    for app_doc in unscored_apps:
+        try:
+            jd = app_doc.job_description or f"{app_doc.role} at {app_doc.company_name}"
+            result = await analyze_resume_match(resume_text_to_use, jd)
+            app_doc.ai_match_score = result.get("overall_match_score") or result.get("match_score", 0)
+            app_doc.ai_experience_alignment = result.get("experience_alignment", "Low")
+            app_doc.ai_summary = result.get("summary", "")
+            app_doc.ai_missing_skills = result.get("missing_skills", [])
+            app_doc.ai_suggestions = result.get("improvement_suggestions") or [
+                a.get("description", "") for a in result.get("action_plan", [])
+            ]
+            await app_doc.save()
+            count += 1
+        except Exception as e:
+            print(f"Error scoring app {app_doc.id}: {e}")
+
+    return {"scored": count, "message": f"Successfully scored {count} applications"}
+
 @app.patch("/api/applications/{app_id}")
 @app.put("/api/applications/{app_id}")
 async def modify_app(app_id: PydanticObjectId, data: AppUpdateInline, current_user: str = Depends(get_current_user)):
@@ -721,42 +810,274 @@ async def remove_app(app_id: PydanticObjectId, current_user: str = Depends(get_c
     return {"message": "Deleted", "id": str(app_id)}
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# NEW: /api/resume/upload  and  /api/resume/analyze
+# PHASE 2: RESUME STORAGE & ASYNC AI PARSING
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+
+def delete_physical_resume_file(file_url: Optional[str], cloudinary_id: Optional[str] = None):
+    """
+    Safely deletes resume file from local storage and Cloudinary if configured.
+    """
+    if cloudinary_id:
+        try:
+            import cloudinary.uploader
+            cloudinary.uploader.destroy(cloudinary_id, resource_type="raw")
+            print(f"✅ Cloudinary file deleted: {cloudinary_id}")
+        except Exception as e:
+            print(f"⚠️ Cloudinary delete failed for {cloudinary_id}: {e}")
+
+    if file_url and file_url.startswith("/static/resumes/"):
+        filename = os.path.basename(file_url)
+        disk_path = os.path.join(RESUME_DIR, filename)
+        if os.path.exists(disk_path):
+            try:
+                os.remove(disk_path)
+                print(f"✅ Local resume file deleted: {disk_path}")
+            except Exception as e:
+                print(f"⚠️ Failed deleting local file {disk_path}: {e}")
+
+
+
+async def process_resume_parsing_task(user_email: str, clean_text: str):
+    """
+    FastAPI BackgroundTask: Parses structured JSON from cleaned text,
+    then updates the Resume document status to 'parsed' (or 'failed' on error).
+    """
+    try:
+        parsed = await parse_resume_json(clean_text)
+        if isinstance(parsed, dict) and "error" in parsed:
+            print(f"⚠️ Resume parse warning for {user_email}: {parsed.get('error')}")
+            parsed = {}
+
+        resume_doc = await Resume.find_one(Resume.user_id == user_email)
+        if resume_doc:
+            resume_doc.parsed_json = parsed if isinstance(parsed, dict) else {}
+            resume_doc.status = "parsed"
+            await resume_doc.save()
+            print(f"✅ Background resume parse completed for {user_email}")
+    except Exception as e:
+        print(f"❌ Background resume parse failed for {user_email}: {e}")
+        resume_doc = await Resume.find_one(Resume.user_id == user_email)
+        if resume_doc:
+            resume_doc.status = "failed"
+            await resume_doc.save()
+
+
 class ResumeAnalyzeRequest(BaseModel):
     job_description: str
+    resume_text: Optional[str] = None  # inline fallback from upload response
+
 
 @app.post("/api/resume/upload")
-async def api_resume_upload(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
+@app.post("/users/me/resume")
+async def api_resume_upload(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Phase 2 — Structured Resume Storage with Asynchronous Background Parsing.
+    1. Removes any existing physical file to prevent orphan files.
+    2. Saves new file to disk.
+    3. Extracts & cleans text.
+    4. Upserts a Resume document with status="pending".
+    5. Returns IMMEDIATELY (< 100ms) while background task runs Gemini parse.
+    """
     user = await User.find_one(User.email == current_user)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
     try:
-        ext = (file.filename or "resume.pdf").split(".")[-1]
+        # ── Orphan Cleanup: remove old file if exists ─────────────────────────
+        existing_resume = await Resume.find_one(Resume.user_id == current_user)
+        if existing_resume:
+            try:
+                delete_physical_resume_file(existing_resume.file_url, existing_resume.cloudinary_public_id)
+            except Exception as oe:
+                print(f"⚠️ Orphan file deletion warning: {oe}")
+
+        # ── Save new file ─────────────────────────────────────────────────────
+        ext = (file.filename or "resume.pdf").rsplit(".", 1)[-1].lower()
         safe_name = f"{current_user.replace('@','_').replace('.','_')}_{int(datetime.now().timestamp())}.{ext}"
         filepath = os.path.join(RESUME_DIR, safe_name)
+
         content = await file.read()
         with open(filepath, "wb") as f:
             f.write(content)
         await file.seek(0)
-        text = await extract_text_from_pdf(file)
-        user.resume_text = text
-        user.uploaded_file_url = f"/static/resumes/{safe_name}"
+
+        # ── Extract & clean text ──────────────────────────────────────────────
+        raw_text = await extract_text_from_pdf(file)
+        from .ai_utils import clean_extracted_text
+        cleaned_text = clean_extracted_text(raw_text)
+
+        version_hash = hashlib.sha256(cleaned_text.encode()).hexdigest()[:12] if cleaned_text else ""
+        file_url = f"/static/resumes/{safe_name}"
+
+        # ── Upsert Resume document with status="pending" ──────────────────────
+        if existing_resume:
+            existing_resume.raw_text = cleaned_text
+            existing_resume.parsed_json = {}
+            existing_resume.file_url = file_url
+            existing_resume.original_filename = file.filename or safe_name
+            existing_resume.uploaded_at = datetime.now()
+            existing_resume.resume_version = version_hash
+            existing_resume.status = "pending"
+            await existing_resume.save()
+            resume_doc = existing_resume
+        else:
+            resume_doc = Resume(
+                user_id=current_user,
+                raw_text=cleaned_text,
+                parsed_json={},
+                file_url=file_url,
+                original_filename=file.filename or safe_name,
+                resume_version=version_hash,
+                status="pending",
+            )
+            await resume_doc.insert()
+
+        # ── Update User profile ───────────────────────────────────────────────
+        user.resume_text = cleaned_text
+        user.uploaded_file_url = file_url
+        user.resume_id = str(resume_doc.id)
         await user.save()
-        return {"message": "Resume uploaded", "text_preview": text[:100] + "...", "uploaded_file_url": user.uploaded_file_url}
+
+        # ── Enqueue Background Gemini Parse Task ──────────────────────────────
+        background_tasks.add_task(process_resume_parsing_task, current_user, cleaned_text)
+
+        return {
+            "status": "pending",
+            "message": "Resume uploaded successfully. Parsing structured profile in background...",
+            "full_text": cleaned_text,
+            "text_preview": cleaned_text[:200] + "..." if len(cleaned_text) > 200 else cleaned_text,
+            "uploaded_file_url": file_url,
+            "filename": file.filename,
+            "characters": len(cleaned_text),
+            "resume_version": version_hash,
+            "parsed": {},
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
-@app.post("/api/resume/analyze")
-async def api_resume_analyze(data: ResumeAnalyzeRequest, current_user: str = Depends(get_current_user)):
+
+@app.get("/api/resume/me")
+@app.get("/users/me/resume")
+async def api_get_resume(current_user: str = Depends(get_current_user)):
+    """
+    Phase 2 — Return the user's stored structured Resume document with status.
+    """
     user = await User.find_one(User.email == current_user)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if not user.resume_text:
-        raise HTTPException(status_code=400, detail="No resume uploaded. Upload first.")
+
+    resume_doc = await Resume.find_one(Resume.user_id == current_user)
+    if not resume_doc:
+        if user.resume_text:
+            return {
+                "id": None,
+                "user_id": current_user,
+                "status": "parsed",
+                "raw_text": user.resume_text,
+                "parsed_json": {},
+                "file_url": user.uploaded_file_url,
+                "original_filename": None,
+                "uploaded_at": None,
+                "resume_version": "",
+            }
+        raise HTTPException(status_code=404, detail="No resume uploaded yet")
+
+    return {
+        "id": str(resume_doc.id),
+        "user_id": resume_doc.user_id,
+        "status": getattr(resume_doc, "status", "parsed"),
+        "raw_text": resume_doc.raw_text,
+        "parsed_json": resume_doc.parsed_json,
+        "file_url": resume_doc.file_url,
+        "original_filename": resume_doc.original_filename,
+        "uploaded_at": resume_doc.uploaded_at.isoformat() if resume_doc.uploaded_at else None,
+        "resume_version": resume_doc.resume_version,
+    }
+
+
+@app.delete("/api/resume/me")
+@app.delete("/users/me/resume")
+async def api_delete_resume(current_user: str = Depends(get_current_user)):
+    """
+    Phase 2 — Hard Delete Resume:
+    1. Physical file deletion (disk & Cloudinary).
+    2. Drops Resume document.
+    3. Clears User profile fields.
+    4. Invalidates all stale ResumeAnalysis records for this user.
+    """
+    user = await User.find_one(User.email == current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    resume_doc = await Resume.find_one(Resume.user_id == current_user)
+    if not resume_doc and not user.resume_text and not user.uploaded_file_url:
+        raise HTTPException(status_code=404, detail="No stored resume found to delete")
+
+    # 1. Physical file deletion & Resume document drop
+    if resume_doc:
+        try:
+            delete_physical_resume_file(resume_doc.file_url, getattr(resume_doc, "cloudinary_public_id", None))
+        except Exception as e:
+            print(f"⚠️ Physical file deletion warning: {e}")
+        await resume_doc.delete()
+    elif user.uploaded_file_url:
+        try:
+            delete_physical_resume_file(user.uploaded_file_url)
+        except Exception as e:
+            print(f"⚠️ Physical file deletion warning: {e}")
+
+    # 2. Clear user profile fields
+    user.resume_text = None
+    user.uploaded_file_url = None
+    user.resume_id = None
+    await user.save()
+
+    # 3. Invalidate stale ResumeAnalysis records computed against this resume
     try:
-        result = await analyze_resume_match(user.resume_text, data.job_description)
+        deleted_count = await ResumeAnalysis.find(ResumeAnalysis.user_email == current_user).delete()
+        print(f"✅ Invalidated {deleted_count} stale ResumeAnalysis records for {current_user}")
+    except Exception as ae:
+        print(f"⚠️ Warning: could not delete ResumeAnalysis records: {ae}")
+
+    return {"success": True, "message": "Resume deleted successfully and job match records invalidated"}
+
+
+@app.post("/api/resume/analyze")
+async def api_resume_analyze(data: ResumeAnalyzeRequest, current_user: str = Depends(get_current_user)):
+    """
+    Phase 2 — Analyzes resume vs. a job description.
+    Text priority: stored Resume.raw_text > User.resume_text > inline request.resume_text
+    """
+    user = await User.find_one(User.email == current_user)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Resolve resume text — prefer stored Resume doc, then user profile, then inline fallback
+    resume_text_to_use: Optional[str] = None
+    resume_doc = await Resume.find_one(Resume.user_id == current_user)
+    if resume_doc and resume_doc.raw_text:
+        resume_text_to_use = resume_doc.raw_text
+    elif user.resume_text:
+        resume_text_to_use = user.resume_text
+    elif data.resume_text:
+        resume_text_to_use = data.resume_text
+
+    if not resume_text_to_use:
+        raise HTTPException(
+            status_code=400,
+            detail="No resume text found. Please upload your resume first."
+        )
+
+    try:
+        result = await analyze_resume_match(resume_text_to_use, data.job_description)
         # Normalize key names so both old and new frontend keys work
         result["overall_match_score"] = result.get("overall_match_score") or result.get("match_score", 0)
         result["improvement_suggestions"] = result.get("improvement_suggestions") or [
@@ -766,6 +1087,8 @@ async def api_resume_analyze(data: ResumeAnalyzeRequest, current_user: str = Dep
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Analysis failed: {e}")
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -961,3 +1284,6 @@ async def delete_automation(auto_id: PydanticObjectId, current_user: str = Depen
         raise HTTPException(status_code=404, detail="Automation not found")
     await auto.delete()
     return {"success": True, "message": "Automation deleted", "id": str(auto_id)}
+
+from .routes.jobs import router as jobs_router
+app.include_router(jobs_router)
