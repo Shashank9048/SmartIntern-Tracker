@@ -33,23 +33,25 @@ export interface ActionPlanItem {
 }
 
 export interface ApplicationAnalysis {
-  overall_match_score: number
-  experience_alignment: 'High' | 'Medium' | 'Low'
-  skills_found: string[]
-  missing_skills: string[]
-  strengths: string[]
-  weaknesses: string[]
-  improvement_suggestions: string[]
-  ats_score: number
-  summary: string
-  resume_completeness: {
+  overall_match_score?: number
+  match_score?: number
+  experience_alignment?: 'High' | 'Medium' | 'Low' | string
+  skills_found?: string[]
+  missing_skills?: string[]
+  strengths?: string[]
+  weaknesses?: string[]
+  improvement_suggestions?: string[]
+  action_plan?: ActionPlanItem[]
+  ats_score?: number
+  summary?: string
+  resume_completeness?: {
     has_summary: boolean
     has_projects: boolean
     has_experience: boolean
     has_skills_section: boolean
     has_education: boolean
   }
-  resume_snapshot: string
+  resume_snapshot?: string
   job_description?: string
 }
 
@@ -64,12 +66,13 @@ export interface Application {
   notes?: string
   job_description?: string
 
-  // AI-generated flattened fields from backend ai_service.py
+  // AI-generated fields
   ai_match_score?: number
   ai_experience_alignment?: string
   ai_summary?: string
   ai_missing_skills?: string[]
   ai_suggestions?: string[]
+  analysis?: ApplicationAnalysis
 
   created_at: string
   updated_at: string
@@ -262,3 +265,29 @@ export interface FormState {
 export interface FormErrors {
   [key: string]: string
 }
+
+// Phase 5 — Job Matching Feed Types
+
+export type MatchStatus = 'no_resume' | 'computing' | 'ready'
+
+export interface RecommendedJobEntry {
+  job_id: string
+  match_score: number
+  matched_skills: string[]
+  missing_skills: string[]
+  job: {
+    title: string
+    company: string
+    location: string
+    description: string
+    required_skills: string[]
+    posted_at?: string
+  }
+}
+
+export interface MatchStatusResponse {
+  status: MatchStatus
+  match_count: number
+  resume_version?: string
+}
+
