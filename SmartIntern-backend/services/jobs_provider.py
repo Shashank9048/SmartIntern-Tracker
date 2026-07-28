@@ -218,6 +218,8 @@ class MockJobsProvider(JobsProvider):
         jobs = []
         for i, item in enumerate(self.fixtures_data):
             posted_time = now - timedelta(days=i % 14, hours=i * 2)
+            # Give every third mock job a future deadline (e.g. 15-30 days out)
+            deadline_time = (now + timedelta(days=15 + (i % 15))) if (i % 3 == 0) else None
             job = Job(
                 title=item["title"],
                 company=item["company"],
@@ -227,7 +229,9 @@ class MockJobsProvider(JobsProvider):
                 source=item["source"],
                 external_id=f"mock-{i}",
                 application_url=item["application_url"],
-                posted_at=posted_time
+                posted_at=posted_time,
+                deadline=deadline_time,
+                is_active=True
             )
             jobs.append(job)
             
@@ -276,8 +280,6 @@ class AdzunaProvider(JobsProvider):
                 data = response.json()
 
                 for result in data.get("results", []):
-                    # Extract skills roughly from description or category if possible,
-                    # Adzuna doesn't give a neat required_skills array
                     category = result.get("category", {}).get("label", "")
                     
                     job = Job(
@@ -289,7 +291,9 @@ class AdzunaProvider(JobsProvider):
                         source="adzuna",
                         external_id=str(result.get("id", "")),
                         application_url=result.get("redirect_url", ""),
-                        posted_at=datetime.strptime(result.get("created"), "%Y-%m-%dT%H:%M:%SZ") if result.get("created") else datetime.now()
+                        posted_at=datetime.strptime(result.get("created"), "%Y-%m-%dT%H:%M:%SZ") if result.get("created") else datetime.now(),
+                        deadline=None,
+                        is_active=True
                     )
                     jobs.append(job)
         except Exception as e:
@@ -335,6 +339,14 @@ class JSearchProvider(JobsProvider):
                     if isinstance(reqs, list):
                         skills = reqs
 
+                    exp_str = result.get("job_offer_expiration_datetime_utc")
+                    deadline = None
+                    if exp_str:
+                        try:
+                            deadline = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+                        except Exception:
+                            deadline = None
+
                     job = Job(
                         title=result.get("job_title", ""),
                         company=result.get("employer_name", ""),
@@ -344,7 +356,9 @@ class JSearchProvider(JobsProvider):
                         source="jsearch",
                         external_id=result.get("job_id", ""),
                         application_url=result.get("job_apply_link", ""),
-                        posted_at=datetime.strptime(result.get("job_posted_at_datetime_utc"), "%Y-%m-%dT%H:%M:%S.%fZ") if result.get("job_posted_at_datetime_utc") else datetime.now()
+                        posted_at=datetime.fromisoformat(result["job_posted_at_datetime_utc"].replace("Z", "+00:00")) if result.get("job_posted_at_datetime_utc") else datetime.now(),
+                        deadline=deadline,
+                        is_active=True
                     )
                     jobs.append(job)
         except Exception as e:

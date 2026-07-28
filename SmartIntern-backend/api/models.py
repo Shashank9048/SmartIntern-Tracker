@@ -24,6 +24,8 @@ class Job(Document):
     external_id: Optional[str] = None
     application_url: Optional[str] = None
     posted_at: Optional[datetime] = None
+    deadline: Optional[datetime] = None
+    is_active: bool = True
     created_at: datetime = Field(default_factory=datetime.now)
 
     class Settings:

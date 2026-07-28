@@ -3,7 +3,7 @@ import hashlib
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, HTTPException
 from typing import List, Optional
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from ..models import Job, Resume, UserJobMatch
@@ -24,6 +24,7 @@ class JobCreate(BaseModel):
     required_skills: List[str]
     location: str
     application_url: str
+    deadline: Optional[datetime] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33,6 +34,28 @@ class JobCreate(BaseModel):
 def _normalise(skill: str) -> str:
     """Lower-case, strip whitespace for case-insensitive comparison."""
     return skill.strip().lower()
+
+
+def _is_job_current_and_upcoming(job: Job) -> bool:
+    """
+    Check if a job posting is current and upcoming:
+    - is_active must be True (not delisted)
+    - If deadline is set: deadline must be >= now
+    - If deadline is None: posted_at must be within 45 days of now
+    """
+    if not job.is_active:
+        return False
+
+    now = datetime.now()
+
+    if job.deadline is not None:
+        return job.deadline >= now
+
+    if job.posted_at is not None:
+        stale_cutoff = now - timedelta(days=45)
+        return job.posted_at >= stale_cutoff
+
+    return True
 
 
 def _score_resume_against_job(
@@ -68,25 +91,22 @@ async def _extract_candidate_skills(user_email: str) -> tuple[Optional[str], Lis
     if not resume_doc:
         return None, []
 
-    # Prefer parsed_json.skills (structured), fall back to raw_text keywords
     parsed = resume_doc.parsed_json or {}
     skills: List[str] = parsed.get("skills", [])
 
-    # If parsed_json has no skills, try to extract tokens from raw_text
     if not skills and resume_doc.raw_text:
-        # Simple heuristic: split on commas/newlines, take tokens 2-25 chars
         tokens = []
         for tok in resume_doc.raw_text.replace(",", "\n").split("\n"):
             t = tok.strip()
             if 2 <= len(t) <= 25:
                 tokens.append(t)
-        skills = tokens[:80]  # cap at 80 to avoid runaway lists
+        skills = tokens[:80]
 
     return resume_doc.resume_version, skills
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /api/jobs  (Phase 3 — unchanged)
+# GET /api/jobs
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=List[Job])
@@ -97,8 +117,8 @@ async def get_jobs(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Phase 3: Fetch jobs from providers.
-    Uses AdzunaProvider if configured, otherwise falls back to MockJobsProvider.
+    Fetch current and upcoming jobs from providers/DB.
+    Excludes expired deadlines, delisted jobs, and stale postings (>45 days).
     """
     jobs = []
     if adzuna_provider.app_id and adzuna_provider.app_key:
@@ -112,11 +132,74 @@ async def get_jobs(
         logger.info("Falling back to MockJobsProvider")
         jobs = await mock_provider.fetch_jobs(query=query, location=location, limit=limit)
 
-    return jobs
+    current_jobs = [j for j in jobs if _is_job_current_and_upcoming(j)]
+    return current_jobs[:limit]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# POST /api/jobs/match  — trigger batch matching for current user (Phase 5)
+# POST /api/jobs/sync — sync fresh jobs & mark delisted jobs inactive
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/sync")
+async def sync_jobs(
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Sync fresh job listings from active provider.
+    Marks jobs as is_active=False if they no longer appear in the fresh pull (delisted).
+    """
+    fresh_jobs = []
+    if adzuna_provider.app_id and adzuna_provider.app_key:
+        try:
+            fresh_jobs = await adzuna_provider.fetch_jobs(limit=50)
+        except Exception as e:
+            logger.error(f"Sync error from AdzunaProvider: {e}")
+
+    if not fresh_jobs:
+        fresh_jobs = await mock_provider.fetch_jobs(limit=50)
+
+    fresh_external_ids = {j.external_id for j in fresh_jobs if j.external_id}
+    fresh_signatures = {(j.company.lower().strip(), j.title.lower().strip()) for j in fresh_jobs}
+
+    existing_db_jobs = await Job.find_all().to_list()
+    delisted_count = 0
+    updated_count = 0
+
+    for db_job in existing_db_jobs:
+        is_still_present = (
+            (db_job.external_id and db_job.external_id in fresh_external_ids) or
+            ((db_job.company.lower().strip(), db_job.title.lower().strip()) in fresh_signatures)
+        )
+        if not is_still_present:
+            if db_job.is_active:
+                db_job.is_active = False
+                await db_job.save()
+                delisted_count += 1
+        else:
+            if not db_job.is_active:
+                db_job.is_active = True
+                await db_job.save()
+                updated_count += 1
+
+    inserted_count = 0
+    for fj in fresh_jobs:
+        existing = await Job.find_one(
+            (Job.external_id == fj.external_id) if fj.external_id else (Job.title == fj.title, Job.company == fj.company)
+        )
+        if not existing:
+            await fj.insert()
+            inserted_count += 1
+
+    return {
+        "message": "Jobs synced successfully",
+        "total_fresh": len(fresh_jobs),
+        "inserted": inserted_count,
+        "delisted": delisted_count,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/jobs/match — trigger batch matching for current user
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/match")
@@ -124,26 +207,25 @@ async def trigger_job_matching(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Phase 5: Compute keyword-overlap match scores between the user's resume
-    and every Job in the database, upsert UserJobMatch records.
+    Compute keyword-overlap match scores between user resume and active jobs.
     """
     resume_version, candidate_skills = await _extract_candidate_skills(current_user)
 
     if resume_version is None:
         return {"triggered": False, "reason": "no_resume", "total_jobs": 0}
 
-    # Load all jobs (mock or DB-persisted)
     all_jobs = await Job.find_all().to_list()
 
     if not all_jobs:
-        # Seed from mock provider if DB is empty
         seeded = await mock_provider.fetch_jobs(limit=50)
         for job in seeded:
             await job.insert()
         all_jobs = await Job.find_all().to_list()
 
+    current_jobs = [j for j in all_jobs if _is_job_current_and_upcoming(j)]
+
     scored = 0
-    for job in all_jobs:
+    for job in current_jobs:
         score, matched, missing = _score_resume_against_job(
             candidate_skills,
             job.required_skills,
@@ -151,7 +233,6 @@ async def trigger_job_matching(
 
         job_id = str(job.id)
 
-        # Upsert: delete old record then insert fresh one
         existing = await UserJobMatch.find_one(
             UserJobMatch.user_id == current_user,
             UserJobMatch.job_id == job_id,
@@ -171,22 +252,18 @@ async def trigger_job_matching(
         await match_doc.insert()
         scored += 1
 
-    logger.info(f"Batch match complete for {current_user}: {scored} jobs scored")
+    logger.info(f"Batch match complete for {current_user}: {scored} active jobs scored")
     return {"triggered": True, "total_jobs": scored, "resume_version": resume_version}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /api/jobs/match/status  — polling status for the frontend (Phase 5)
+# GET /api/jobs/match/status — polling status for frontend
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/match/status")
 async def get_match_status(
     current_user: str = Depends(get_current_user),
 ):
-    """
-    Phase 5: Returns the current state of job matching for this user.
-    status: 'no_resume' | 'computing' | 'ready'
-    """
     resume_doc = await Resume.find_one(Resume.user_id == current_user)
 
     if not resume_doc:
@@ -214,7 +291,7 @@ async def get_match_status(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /api/jobs/recommended  — enriched sorted results (Phase 5)
+# GET /api/jobs/recommended — enriched sorted results
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/recommended")
@@ -224,8 +301,8 @@ async def get_recommended_jobs(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Phase 5: Return enriched, score-sorted job matches for the current user.
-    Joins UserJobMatch → Job and filters by min_score.
+    Return enriched, score-sorted job matches for current user.
+    Only returns current and upcoming active jobs.
     """
     resume_doc = await Resume.find_one(Resume.user_id == current_user)
     if not resume_doc:
@@ -237,7 +314,6 @@ async def get_recommended_jobs(
         UserJobMatch.match_score >= min_score,
     ).to_list()
 
-    # Sort by match_score descending
     matches.sort(key=lambda m: m.match_score, reverse=True)
     matches = matches[:limit]
 
@@ -246,7 +322,7 @@ async def get_recommended_jobs(
         try:
             from beanie import PydanticObjectId
             job = await Job.get(PydanticObjectId(match.job_id))
-            if not job:
+            if not job or not _is_job_current_and_upcoming(job):
                 continue
         except Exception:
             continue
@@ -264,22 +340,26 @@ async def get_recommended_jobs(
                     "location": job.location,
                     "description": job.description,
                     "required_skills": job.required_skills,
+                    "application_url": job.application_url,
                     "posted_at": job.posted_at.isoformat() if job.posted_at else None,
+                    "deadline": job.deadline.isoformat() if job.deadline else None,
+                    "is_active": job.is_active,
                 },
             }
         )
 
     return results
+
+
 @router.post("/admin")
 async def create_admin_job(
     job_data: JobCreate,
-    current_user: dict = Depends(get_current_user)
+    current_user: str = Depends(get_current_user)
 ):
     """
     Manually create a job posting (Admin).
-    application_url is required for applyable jobs.
+    application_url is required for applyable jobs. Optional deadline supported.
     """
-    # Simple check for admin role can be added here if roles existed
     new_job = Job(
         title=job_data.title,
         company=job_data.company,
@@ -287,7 +367,9 @@ async def create_admin_job(
         required_skills=job_data.required_skills,
         location=job_data.location,
         source="manual",
-        application_url=job_data.application_url
+        application_url=job_data.application_url,
+        deadline=job_data.deadline,
+        is_active=True,
     )
     await new_job.insert()
     return {"message": "Job created successfully", "job_id": str(new_job.id)}
