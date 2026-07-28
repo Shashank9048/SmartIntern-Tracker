@@ -110,10 +110,11 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
       })
     : null
 
-  const handleApply = async () => {
+  const handleApply = () => {
     if (actioning || tracked) return
 
-    if (!job.application_url) {
+    if (!job.application_url || !job.application_url.trim()) {
+      console.warn('[JobCard] Missing application_url for job:', job_id, job.title)
       toast.error('No application link for this listing', {
         style: {
           background: '#09090b',
@@ -125,14 +126,30 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
       return
     }
 
-    setActioning('apply')
-    try {
-      window.open(job.application_url, '_blank')
-      onApply?.(job_id)
-      setTracked(true)
-      setTrackedAs('applied')
-    } finally {
-      setActioning(null)
+    const rawUrl = job.application_url.trim()
+    const targetUrl =
+      rawUrl.startsWith('http://') || rawUrl.startsWith('https://')
+        ? rawUrl
+        : `https://${rawUrl}`
+
+    // 1. Open tab synchronously inside user gesture handler BEFORE any async await
+    window.open(targetUrl, '_blank', 'noopener,noreferrer')
+    
+    // Update local card UI state immediately
+    setTracked(true)
+    setTrackedAs('applied')
+
+    // 2. Fire tracking call in parallel (non-blocking)
+    if (onApply) {
+      setActioning('apply')
+      Promise.resolve(onApply(job_id))
+        .catch((err) => {
+          console.error('[JobCard] Background application tracking failed:', err)
+          toast.error('Application opened, but failed to save tracking record.')
+        })
+        .finally(() => {
+          setActioning(null)
+        })
     }
   }
 

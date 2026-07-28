@@ -530,7 +530,9 @@ export default function ApplicationsPage() {
                             setTrackedJobIds(prev => new Set([...prev, jobId]))
                             toast.success('✓ Tracked as Applied', { duration: 2500 })
                           } catch (e: any) {
+                            console.error('[ApplicationsPage] Failed to track application:', e)
                             toast.error(e?.message || 'Failed to track application')
+                            throw e
                           }
                         }}
                         onSave={async (jobId) => {
