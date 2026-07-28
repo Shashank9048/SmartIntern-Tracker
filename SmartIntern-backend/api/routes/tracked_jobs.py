@@ -113,6 +113,29 @@ async def create_tracked_job(
     )
     await tracked.insert()
 
+    # Also create Application record to populate My Applications + locked-in match score
+    try:
+        from ..models import Application
+        app_status = "Applied" if body.status == "applied" else "Wishlist" if body.status == "wishlist" else body.status.capitalize()
+        existing_app = await Application.find_one(
+            Application.user_id == current_user,
+            Application.company_name == job.company,
+            Application.role == job.title,
+        )
+        if not existing_app:
+            new_app = Application(
+                user_id=current_user,
+                company_name=job.company,
+                role=job.title,
+                status=app_status,
+                applied_date=datetime.now(),
+                job_description=job.description,
+                ai_match_score=match_score if match_score > 0 else None,
+            )
+            await new_app.insert()
+    except Exception as ae:
+        logger.warning(f"Failed sync Application record for {body.job_id}: {ae}")
+
     logger.info(f"Tracked job {body.job_id} for {current_user} as '{body.status}'")
     return await _enrich(tracked)
 

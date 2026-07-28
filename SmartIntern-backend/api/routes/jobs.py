@@ -12,7 +12,7 @@ from services.jobs_provider import MockJobsProvider, AdzunaProvider
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
+router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 mock_provider = MockJobsProvider()
 adzuna_provider = AdzunaProvider()
@@ -84,25 +84,35 @@ def _score_resume_against_job(
 
 async def _extract_candidate_skills(user_email: str) -> tuple[Optional[str], List[str]]:
     """
-    Load the user's Resume doc and extract their skills list + resume_version.
-    Returns (resume_version, skills_list) or (None, []) if no resume.
+    Load the user's Resume doc (or fallback to User profile skills)
+    and extract their skills list + resume_version.
+    Returns (resume_version, skills_list) or (None, []) if no resume/skills found.
     """
+    from ..models import User
     resume_doc = await Resume.find_one(Resume.user_id == user_email)
-    if not resume_doc:
-        return None, []
+    if resume_doc:
+        parsed = resume_doc.parsed_json or {}
+        skills: List[str] = parsed.get("skills", [])
+        if not skills and resume_doc.raw_text:
+            tokens = []
+            for tok in resume_doc.raw_text.replace(",", "\n").split("\n"):
+                t = tok.strip()
+                if 2 <= len(t) <= 25:
+                    tokens.append(t)
+            skills = tokens[:80]
+        return resume_doc.resume_version or "v1", skills
 
-    parsed = resume_doc.parsed_json or {}
-    skills: List[str] = parsed.get("skills", [])
+    user = await User.find_one(User.email == user_email)
+    if user and user.skills:
+        version_hash = hashlib.sha256(",".join(user.skills).encode()).hexdigest()[:12]
+        return version_hash, user.skills
 
-    if not skills and resume_doc.raw_text:
-        tokens = []
-        for tok in resume_doc.raw_text.replace(",", "\n").split("\n"):
-            t = tok.strip()
-            if 2 <= len(t) <= 25:
-                tokens.append(t)
-        skills = tokens[:80]
+    if user and user.resume_text:
+        version_hash = hashlib.sha256(user.resume_text.encode()).hexdigest()[:12]
+        tokens = [t.strip() for t in user.resume_text.replace(",", "\n").split("\n") if 2 <= len(t.strip()) <= 25]
+        return version_hash, tokens
 
-    return resume_doc.resume_version, skills
+    return None, []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +213,7 @@ async def sync_jobs(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/match")
+@router.post("/match/run")
 async def trigger_job_matching(
     current_user: str = Depends(get_current_user),
 ):
@@ -304,13 +315,13 @@ async def get_recommended_jobs(
     Return enriched, score-sorted job matches for current user.
     Only returns current and upcoming active jobs.
     """
-    resume_doc = await Resume.find_one(Resume.user_id == current_user)
-    if not resume_doc:
+    resume_version, _ = await _extract_candidate_skills(current_user)
+    if not resume_version:
         return []
 
     matches = await UserJobMatch.find(
         UserJobMatch.user_id == current_user,
-        UserJobMatch.resume_version == resume_doc.resume_version,
+        UserJobMatch.resume_version == resume_version,
         UserJobMatch.match_score >= min_score,
     ).to_list()
 
@@ -318,7 +329,10 @@ async def get_recommended_jobs(
     matches = matches[:limit]
 
     results = []
+    seen_job_ids = set()
     for match in matches:
+        if match.job_id in seen_job_ids:
+            continue
         try:
             from beanie import PydanticObjectId
             job = await Job.get(PydanticObjectId(match.job_id))
@@ -327,6 +341,7 @@ async def get_recommended_jobs(
         except Exception:
             continue
 
+        seen_job_ids.add(match.job_id)
         results.append(
             {
                 "job_id": match.job_id,

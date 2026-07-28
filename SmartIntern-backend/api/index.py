@@ -922,6 +922,23 @@ async def api_resume_upload(
         version_hash = hashlib.sha256(cleaned_text.encode()).hexdigest()[:12] if cleaned_text else ""
         file_url = f"/static/resumes/{safe_name}"
 
+        # ── Cloudinary upload (if configured) ─────────────────────────────────
+        cloudinary_public_id = None
+        cloudinary_url_env = os.environ.get("CLOUDINARY_URL")
+        if cloudinary_url_env:
+            try:
+                import cloudinary
+                import cloudinary.uploader
+                cloudinary.config(cloudinary_url=cloudinary_url_env)
+                res_cloud = cloudinary.uploader.upload(filepath, resource_type="raw", folder="smart_intern_resumes")
+                if res_cloud and "public_id" in res_cloud:
+                    cloudinary_public_id = res_cloud["public_id"]
+                    if "secure_url" in res_cloud:
+                        file_url = res_cloud["secure_url"]
+                    print(f"✅ Uploaded resume to Cloudinary: {cloudinary_public_id}")
+            except Exception as ce:
+                print(f"⚠️ Cloudinary upload warning: {ce}")
+
         # ── Upsert Resume document with status="pending" ──────────────────────
         if existing_resume:
             existing_resume.raw_text = cleaned_text
@@ -931,6 +948,7 @@ async def api_resume_upload(
             existing_resume.uploaded_at = datetime.now()
             existing_resume.resume_version = version_hash
             existing_resume.status = "pending"
+            existing_resume.cloudinary_public_id = cloudinary_public_id
             await existing_resume.save()
             resume_doc = existing_resume
         else:
@@ -942,6 +960,7 @@ async def api_resume_upload(
                 original_filename=file.filename or safe_name,
                 resume_version=version_hash,
                 status="pending",
+                cloudinary_public_id=cloudinary_public_id,
             )
             await resume_doc.insert()
 
@@ -1291,7 +1310,8 @@ async def delete_automation(auto_id: PydanticObjectId, current_user: str = Depen
     return {"success": True, "message": "Automation deleted", "id": str(auto_id)}
 
 from .routes.jobs import router as jobs_router
-app.include_router(jobs_router)
+app.include_router(jobs_router, prefix="/api")
+app.include_router(jobs_router, prefix="")
 
 from .routes.tracked_jobs import router as tracked_jobs_router
 app.include_router(tracked_jobs_router)

@@ -19,6 +19,9 @@ const PROTECTED_PREFIXES = [
   '/resume',
   '/settings',
   '/jobs',
+  '/assistant',
+  '/cold-email',
+  '/automation',
 ]
 
 const AUTH_PAGES = ['/login', '/signup']

@@ -517,11 +517,11 @@ export default function ApplicationsPage() {
                   className="flex gap-4 overflow-x-auto pb-4 pr-8"
                   style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
                 >
-                  {recommendedJobs
+                  {Array.from(new Map(recommendedJobs.map(j => [j.job_id, j])).values())
                     .filter(j => j.match_score >= minScoreFilter)
-                    .map((entry) => (
+                    .map((entry, idx) => (
                       <JobCard
-                        key={entry.job_id}
+                        key={`${entry.job_id}-${idx}`}
                         entry={entry}
                         isTracked={trackedJobIds.has(entry.job_id)}
                         onApply={async (jobId) => {

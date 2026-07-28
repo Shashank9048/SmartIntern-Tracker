@@ -19,14 +19,30 @@ class NotificationResponse(BaseModel):
     read_bool: bool
     created_at: datetime
 
+async def create_user_notification(user_id: str, notif_type: str, payload: dict):
+    """Utility to trigger a system/user notification."""
+    try:
+        notif = Notification(
+            user_id=user_id,
+            type=notif_type,
+            payload=payload,
+            read_bool=False,
+            created_at=datetime.now()
+        )
+        await notif.insert()
+        return notif
+    except Exception as e:
+        logger.error(f"Failed to create notification: {e}")
+        return None
+
 @router.get("", response_model=List[NotificationResponse])
 async def get_notifications(
-    current_user: dict = Depends(get_current_user)
+    current_user: str = Depends(get_current_user)
 ):
     """
     Get all notifications for the current user, sorted by most recent first.
     """
-    user_email = current_user.get("email")
+    user_email = current_user
     if not user_email:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -46,12 +62,12 @@ async def get_notifications(
 @router.patch("/{notification_id}/read")
 async def mark_read(
     notification_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: str = Depends(get_current_user)
 ):
     """
     Mark a specific notification as read.
     """
-    user_email = current_user.get("email")
+    user_email = current_user
     if not user_email:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -67,3 +83,4 @@ async def mark_read(
     except Exception as e:
         logger.error(f"Error marking notification read: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
