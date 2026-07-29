@@ -248,56 +248,85 @@ class MockJobsProvider(JobsProvider):
         return filtered[:limit]
 
 
-class AdzunaProvider(JobsProvider):
+class RemotiveProvider(JobsProvider):
     """
-    Calls Adzuna using ADZUNA_APP_ID/ADZUNA_APP_KEY. 
-    If those env vars are missing, returns nothing and logs a warning.
+    Calls the Remotive public API — no auth required.
+    GET https://remotive.com/api/remote-jobs?category=software-dev
+    Returns remote tech/software roles with a direct 'url' (real employer link).
+    Results are cached in-memory for TTL_SECONDS (6 hours) to avoid hammering.
     """
+    TTL_SECONDS = 6 * 3600  # 6 hours
+
     def __init__(self):
-        self.app_id = os.getenv("ADZUNA_APP_ID")
-        self.app_key = os.getenv("ADZUNA_APP_KEY")
-        self.base_url = "https://api.adzuna.com/v1/api/jobs/in/search/1" # Default to India ('in')
+        self._cache: List[Job] = []
+        self._cache_ts: float = 0.0
 
-    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 20) -> List[Job]:
-        if not self.app_id or not self.app_key:
-            logger.warning("ADZUNA_APP_ID or ADZUNA_APP_KEY is missing. Returning empty jobs from AdzunaProvider.")
-            return []
+    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
+        import time
+        now_ts = time.time()
 
-        params = {
-            "app_id": self.app_id,
-            "app_key": self.app_key,
-            "results_per_page": limit,
-            "what": query,
-            "where": location,
-            "content-type": "application/json"
-        }
+        # Serve from cache if fresh
+        if self._cache and (now_ts - self._cache_ts) < self.TTL_SECONDS:
+            logger.info(f"RemotiveProvider: serving {len(self._cache)} jobs from cache (TTL ok)")
+            jobs = self._cache
+        else:
+            jobs = await self._fetch_fresh()
+            self._cache = jobs
+            self._cache_ts = now_ts
 
-        jobs = []
+        # Filter by query if provided
+        if query:
+            q = query.lower()
+            jobs = [
+                j for j in jobs
+                if q in j.title.lower()
+                or q in j.company.lower()
+                or any(q in s.lower() for s in j.required_skills)
+            ]
+        return jobs[:limit]
+
+    async def _fetch_fresh(self) -> List[Job]:
+        url = "https://remotive.com/api/remote-jobs"
+        params = {"category": "software-dev", "limit": 100}
+        jobs: List[Job] = []
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(self.base_url, params=params)
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(url, params=params)
                 response.raise_for_status()
                 data = response.json()
 
-                for result in data.get("results", []):
-                    category = result.get("category", {}).get("label", "")
-                    
-                    job = Job(
-                        title=result.get("title", ""),
-                        company=result.get("company", {}).get("display_name", ""),
-                        description=result.get("description", ""),
-                        required_skills=[category] if category else [],
-                        location=result.get("location", {}).get("display_name", ""),
-                        source="adzuna",
-                        external_id=str(result.get("id", "")),
-                        application_url=result.get("redirect_url", ""),
-                        posted_at=datetime.strptime(result.get("created"), "%Y-%m-%dT%H:%M:%SZ") if result.get("created") else datetime.now(),
-                        deadline=None,
-                        is_active=True
-                    )
-                    jobs.append(job)
+            now = datetime.now()
+            for item in data.get("jobs", []):
+                # Extract skills from tags list
+                tags = item.get("tags", [])
+                skills = [t for t in tags if isinstance(t, str)][:15]
+
+                # Parse date
+                pub_date_str = item.get("publication_date", "")
+                try:
+                    posted_at = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                except Exception:
+                    posted_at = now
+
+                job = Job(
+                    title=item.get("job_type_label", item.get("title", "")).strip() or item.get("title", "").strip(),
+                    company=item.get("company_name", "").strip(),
+                    description=(item.get("description", "") or "")[:2000],
+                    required_skills=skills,
+                    location=item.get("candidate_required_location", "Remote"),
+                    source="remotive",
+                    external_id=f"remotive-{item.get('id', '')}",
+                    # 'url' is the direct employer application page — not a redirect
+                    application_url=item.get("url", ""),
+                    posted_at=posted_at,
+                    deadline=None,
+                    is_active=True,
+                )
+                jobs.append(job)
+
+            logger.info(f"RemotiveProvider: fetched {len(jobs)} jobs from API")
         except Exception as e:
-            logger.error(f"Error fetching jobs from Adzuna: {e}")
+            logger.error(f"RemotiveProvider fetch error: {e}")
 
         return jobs
 
@@ -306,15 +335,26 @@ class JSearchProvider(JobsProvider):
     """
     Calls JSearch on RapidAPI.
     Uses RAPIDAPI_KEY.
+    Rate-limited to once per 24 hours to respect the ~200 req/month cap.
     """
+    DAILY_LIMIT_SECONDS = 23 * 3600  # 23 hours between fetches
+
     def __init__(self):
         self.api_key = os.getenv("RAPIDAPI_KEY")
         self.base_url = "https://jsearch.p.rapidapi.com/search"
+        self._last_fetch_ts: float = 0.0
+        self._cache: List[Job] = []
 
     async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 20) -> List[Job]:
+        import time
         if not self.api_key:
             logger.warning("RAPIDAPI_KEY is missing. Returning empty jobs from JSearchProvider.")
             return []
+
+        now_ts = time.time()
+        if self._cache and (now_ts - self._last_fetch_ts) < self.DAILY_LIMIT_SECONDS:
+            logger.info(f"JSearchProvider: rate-limit guard active. Serving {len(self._cache)} cached jobs.")
+            return self._cache[:limit]
 
         search_query = query
         if location:
@@ -328,7 +368,7 @@ class JSearchProvider(JobsProvider):
 
         jobs = []
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=15) as client:
                 response = await client.get(self.base_url, headers=headers, params=querystring)
                 response.raise_for_status()
                 data = response.json()
@@ -361,6 +401,11 @@ class JSearchProvider(JobsProvider):
                         is_active=True
                     )
                     jobs.append(job)
+
+            import time
+            self._last_fetch_ts = time.time()
+            self._cache = jobs
+            logger.info(f"JSearchProvider: fetched {len(jobs)} fresh jobs")
         except Exception as e:
             logger.error(f"Error fetching jobs from JSearch: {e}")
 

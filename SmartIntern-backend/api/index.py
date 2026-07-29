@@ -102,11 +102,15 @@ async def run_automation_scheduler():
                         email_sent = result.get("status") == "sent"
                         email_error = result.get("error")
 
-                    # Mark completed
-                    automation.status = "completed"
+                    # Mark completed — or failed if email delivery was required but failed
+                    if automation.email_enabled and not email_sent:
+                        automation.status = "failed"
+                        print(f"[automation] {automation.id} marked FAILED — email not sent: {email_error}")
+                    else:
+                        automation.status = "completed"
                     await automation.save()
 
-                    # Log
+                    # Log result
                     log = AutomationLog(
                         automation_id=str(automation.id),
                         user_id=automation.user_id,
@@ -115,7 +119,9 @@ async def run_automation_scheduler():
                         error=email_error,
                     )
                     await log.insert()
-                    print(f"✅ Automation {automation.id} completed. Email sent: {email_sent}")
+                    status_str = "completed" if automation.status == "completed" else "FAILED"
+                    print(f"[automation] {automation.id} {status_str}. email_sent={email_sent}")
+
 
                 except Exception as e:
                     print(f"❌ Error firing automation {automation.id}: {e}")
@@ -851,21 +857,45 @@ async def process_resume_parsing_task(user_email: str, clean_text: str):
     FastAPI BackgroundTask: Parses structured JSON from cleaned text,
     then updates the Resume document status to 'parsed' (or 'failed' on error).
     """
+    resume_doc = None
     try:
         parsed = await parse_resume_json(clean_text)
-        if isinstance(parsed, dict) and "error" in parsed:
-            print(f"⚠️ Resume parse warning for {user_email}: {parsed.get('error')}")
-            parsed = {}
 
         resume_doc = await Resume.find_one(Resume.user_id == user_email)
-        if resume_doc:
-            resume_doc.parsed_json = parsed if isinstance(parsed, dict) else {}
-            resume_doc.status = "parsed"
+        if not resume_doc:
+            print(f"[resume-parse] No Resume doc found for {user_email} after upload. Skipping.")
+            return
+
+        # parse_resume_json returns {"error": "..."} on Gemini/JSON failures
+        if isinstance(parsed, dict) and "error" in parsed:
+            err_msg = parsed.get("error", "Unknown error")
+            print(f"[resume-parse] FAILED for {user_email}: {err_msg[:300]}")
+            resume_doc.parsed_json = {}
+            resume_doc.status = "failed"
             await resume_doc.save()
-            print(f"✅ Background resume parse completed for {user_email}")
+            return
+
+        # Treat empty or non-dict as failure
+        if not parsed or not isinstance(parsed, dict):
+            print(f"[resume-parse] Empty/invalid result for {user_email}. Marking failed.")
+            resume_doc.parsed_json = {}
+            resume_doc.status = "failed"
+            await resume_doc.save()
+            return
+
+        resume_doc.parsed_json = parsed
+        resume_doc.status = "parsed"
+        await resume_doc.save()
+        name = parsed.get("name", "N/A")
+        skills_count = len(parsed.get("skills", []))
+        print(f"[resume-parse] SUCCESS for {user_email}. Name={name}, Skills={skills_count}")
+
     except Exception as e:
-        print(f"❌ Background resume parse failed for {user_email}: {e}")
-        resume_doc = await Resume.find_one(Resume.user_id == user_email)
+        import traceback
+        print(f"[resume-parse] Exception for {user_email}: {e}")
+        traceback.print_exc()
+        if not resume_doc:
+            resume_doc = await Resume.find_one(Resume.user_id == user_email)
         if resume_doc:
             resume_doc.status = "failed"
             await resume_doc.save()

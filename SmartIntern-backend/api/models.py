@@ -20,7 +20,7 @@ class Job(Document):
     description: str
     required_skills: List[str] = []
     location: str
-    source: Literal["manual", "adzuna", "jsearch", "mock"] = "mock"
+    source: str = "mock"
     external_id: Optional[str] = None
     application_url: Optional[str] = None
     posted_at: Optional[datetime] = None
@@ -87,6 +87,7 @@ class Resume(Document):
     uploaded_at: datetime = Field(default_factory=datetime.now)
     resume_version: str = ""              # sha256[:12] of raw_text for cache-busting
     status: str = "parsed"                # pending | parsed | failed
+    parse_error: Optional[str] = None      # visible reason when structured parsing fails/degrades
     cloudinary_public_id: Optional[str] = None
 
     class Settings:
@@ -182,6 +183,7 @@ class Application(Document):
     status: str = "Applied"
     applied_date: datetime = datetime.now()
     interview_date: Optional[datetime] = None
+    deadline_date: Optional[datetime] = None
     notes: Optional[str] = None
     job_description: Optional[str] = None
     
@@ -266,7 +268,7 @@ class Automation(Document):
     scheduled_at: datetime
     email_enabled: bool = True
     ai_prep_enabled: bool = True
-    status: str = "active"               # active | paused | completed
+    status: str = "active"               # active | paused | completed | failed
     created_at: datetime = datetime.now()
 
     class Settings:

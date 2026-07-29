@@ -8,14 +8,15 @@ import logging
 
 from ..models import Job, Resume, UserJobMatch
 from ..auth import get_current_user
-from services.jobs_provider import MockJobsProvider, AdzunaProvider
+from services.jobs_provider import MockJobsProvider, RemotiveProvider, JSearchProvider
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 mock_provider = MockJobsProvider()
-adzuna_provider = AdzunaProvider()
+remotive_provider = RemotiveProvider()
+jsearch_provider = JSearchProvider()
 
 class JobCreate(BaseModel):
     title: str
@@ -129,17 +130,31 @@ async def get_jobs(
     """
     Fetch current and upcoming jobs from providers/DB.
     Excludes expired deadlines, delisted jobs, and stale postings (>45 days).
+    Priority: Remotive (no auth) → JSearch (rate-limited, daily) → Mock.
     """
-    jobs = []
-    if adzuna_provider.app_id and adzuna_provider.app_key:
-        try:
-            jobs = await adzuna_provider.fetch_jobs(query=query, location=location, limit=limit)
-        except Exception as e:
-            logger.error(f"Failed to fetch from AdzunaProvider: {e}")
-            jobs = []
+    jobs: list = []
 
+    # 1. Remotive (free, no auth, cached 6h)
+    try:
+        jobs = await remotive_provider.fetch_jobs(query=query, location=location, limit=limit)
+        if jobs:
+            logger.info(f"GET /jobs: got {len(jobs)} jobs from Remotive")
+    except Exception as e:
+        logger.error(f"Remotive fetch error: {e}")
+        jobs = []
+
+    # 2. JSearch supplement (rate-limited to 1x/day)
+    try:
+        jsearch_jobs = await jsearch_provider.fetch_jobs(query=query or "software intern", location=location or "India", limit=limit)
+        if jsearch_jobs:
+            logger.info(f"GET /jobs: got {len(jsearch_jobs)} jobs from JSearch")
+            jobs = jobs + jsearch_jobs
+    except Exception as e:
+        logger.error(f"JSearch fetch error: {e}")
+
+    # 3. Mock fallback
     if not jobs:
-        logger.info("Falling back to MockJobsProvider")
+        logger.info("No live jobs — falling back to MockJobsProvider")
         jobs = await mock_provider.fetch_jobs(query=query, location=location, limit=limit)
 
     current_jobs = [j for j in jobs if _is_job_current_and_upcoming(j)]
@@ -155,18 +170,31 @@ async def sync_jobs(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Sync fresh job listings from active provider.
+    Sync fresh job listings from Remotive + JSearch.
     Marks jobs as is_active=False if they no longer appear in the fresh pull (delisted).
     """
-    fresh_jobs = []
-    if adzuna_provider.app_id and adzuna_provider.app_key:
-        try:
-            fresh_jobs = await adzuna_provider.fetch_jobs(limit=50)
-        except Exception as e:
-            logger.error(f"Sync error from AdzunaProvider: {e}")
+    fresh_jobs: list = []
 
+    # Remotive (freely callable)
+    try:
+        remotive_jobs = await remotive_provider.fetch_jobs(limit=100)
+        fresh_jobs.extend(remotive_jobs)
+        logger.info(f"Sync: got {len(remotive_jobs)} from Remotive")
+    except Exception as e:
+        logger.error(f"Sync error from RemotiveProvider: {e}")
+
+    # JSearch (rate-limited)
+    try:
+        jsearch_jobs = await jsearch_provider.fetch_jobs(query="software intern", location="India", limit=50)
+        fresh_jobs.extend(jsearch_jobs)
+        logger.info(f"Sync: got {len(jsearch_jobs)} from JSearch")
+    except Exception as e:
+        logger.error(f"Sync error from JSearchProvider: {e}")
+
+    # Fall back to mock if both live sources fail
     if not fresh_jobs:
         fresh_jobs = await mock_provider.fetch_jobs(limit=50)
+        logger.info("Sync: using mock data fallback")
 
     fresh_external_ids = {j.external_id for j in fresh_jobs if j.external_id}
     fresh_signatures = {(j.company.lower().strip(), j.title.lower().strip()) for j in fresh_jobs}
