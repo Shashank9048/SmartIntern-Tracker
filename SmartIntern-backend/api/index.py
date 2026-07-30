@@ -12,7 +12,11 @@ import sys
 import os
 import asyncio
 import hashlib
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -167,6 +171,9 @@ async def lifespan(app: FastAPI):
     from services.scheduler import NotificationScheduler
     notif_scheduler = NotificationScheduler()
     notif_scheduler.start()
+
+    # Adzuna is now an active primary provider — do NOT delete adzuna-sourced jobs.
+    # (The old one-time cleanup block has been removed.)
 
     yield
 
@@ -859,45 +866,67 @@ async def process_resume_parsing_task(user_email: str, clean_text: str):
     """
     resume_doc = None
     try:
+        logger.info("[resume-parse] Starting for %s — %d chars", user_email, len(clean_text))
         parsed = await parse_resume_json(clean_text)
 
         resume_doc = await Resume.find_one(Resume.user_id == user_email)
         if not resume_doc:
-            print(f"[resume-parse] No Resume doc found for {user_email} after upload. Skipping.")
+            logger.warning("[resume-parse] No Resume doc found for %s after upload. Skipping.", user_email)
             return
 
-        # parse_resume_json returns {"error": "..."} on Gemini/JSON failures
-        if isinstance(parsed, dict) and "error" in parsed:
+        logger.info("[resume-parse] version=%s", resume_doc.resume_version)
+
+        # Hard error: Gemini failed AND text fallback found nothing (empty cleaned text)
+        if isinstance(parsed, dict) and "error" in parsed and "_parse_error" not in parsed:
             err_msg = parsed.get("error", "Unknown error")
-            print(f"[resume-parse] FAILED for {user_email}: {err_msg[:300]}")
+            logger.warning("[resume-parse] FAILED for %s: %s", user_email, err_msg[:300])
             resume_doc.parsed_json = {}
             resume_doc.status = "failed"
+            resume_doc.parse_error = err_msg[:500]
             await resume_doc.save()
             return
 
         # Treat empty or non-dict as failure
         if not parsed or not isinstance(parsed, dict):
-            print(f"[resume-parse] Empty/invalid result for {user_email}. Marking failed.")
+            logger.warning("[resume-parse] Empty/invalid result for %s. Marking failed.", user_email)
             resume_doc.parsed_json = {}
             resume_doc.status = "failed"
             await resume_doc.save()
             return
 
+        # Partial success via text fallback (Gemini failed but text extracted something)
+        if "_parse_error" in parsed:
+            parse_error_msg = parsed.pop("_parse_error", None)
+            resume_doc.parsed_json = parsed
+            resume_doc.status = "parsed"  # still usable — don't block user
+            resume_doc.parse_error = f"AI extraction degraded: {parse_error_msg}"
+            await resume_doc.save()
+            name = parsed.get("name", "N/A")
+            skills_count = len(parsed.get("skills", []))
+            logger.warning(
+                "[resume-parse] Partial parse for %s (text fallback). Name=%s, Skills=%d. Error: %s",
+                user_email, name, skills_count, parse_error_msg
+            )
+            return
+
+        # Full success
         resume_doc.parsed_json = parsed
         resume_doc.status = "parsed"
+        resume_doc.parse_error = None
         await resume_doc.save()
         name = parsed.get("name", "N/A")
         skills_count = len(parsed.get("skills", []))
-        print(f"[resume-parse] SUCCESS for {user_email}. Name={name}, Skills={skills_count}")
+        logger.info("[resume-parse] SUCCESS for %s. Name=%s, Skills=%d", user_email, name, skills_count)
 
     except Exception as e:
         import traceback
-        print(f"[resume-parse] Exception for {user_email}: {e}")
+        logger.error("[resume-parse] Exception for %s: %s", user_email, e)
         traceback.print_exc()
         if not resume_doc:
             resume_doc = await Resume.find_one(Resume.user_id == user_email)
         if resume_doc:
             resume_doc.status = "failed"
+            resume_doc.parse_error = str(e)[:500]
             await resume_doc.save()
 
 
@@ -1348,3 +1377,43 @@ app.include_router(tracked_jobs_router)
 
 from .routes.notifications import router as notifications_router
 app.include_router(notifications_router)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Part C — Admin Debug Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/admin/trigger-digest")
+async def admin_trigger_digest(current_user: str = Depends(get_current_user)):
+    """
+    Manually fire the weekly digest job for testing/debugging.
+    Creates Notification docs and attempts email send.
+    """
+    from services.scheduler import NotificationScheduler
+    scheduler = NotificationScheduler()
+    await scheduler.run_weekly_digest()
+    return {"message": "Weekly digest triggered", "triggered_by": current_user}
+
+
+@app.post("/api/admin/trigger-reminders")
+async def admin_trigger_reminders(current_user: str = Depends(get_current_user)):
+    """
+    Manually fire the deadline/interview reminder job for testing/debugging.
+    """
+    from services.scheduler import NotificationScheduler
+    scheduler = NotificationScheduler()
+    await scheduler.run_deadline_reminders()
+    return {"message": "Deadline/interview reminders triggered", "triggered_by": current_user}
+
+
+@app.get("/api/notifications/unread-count")
+async def get_notifications_unread_count(current_user: str = Depends(get_current_user)):
+    """
+    Returns the count of unread notifications for the current user.
+    Used by the notification bell badge.
+    """
+    count = await Notification.find(
+        Notification.user_id == current_user,
+        Notification.read_bool == False,
+    ).count()
+    return {"count": count}

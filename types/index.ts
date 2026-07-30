@@ -285,6 +285,14 @@ export interface RecommendedJobEntry {
     description: string
     required_skills: string[]
     posted_at?: string
+    /** apply_url — unified apply link, guaranteed non-empty (Google fallback). Frontend reads ONLY this. */
+    apply_url?: string
+    /** application_url — kept for backward compat; same value as apply_url */
+    application_url?: string
+    /** work_mode: 'remote' | 'onsite' | 'hybrid' */
+    work_mode?: string
+    /** source provider: 'adzuna' | 'remotive' | 'jsearch' | 'mock' | 'manual' */
+    source?: string
   }
 }
 

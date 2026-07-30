@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { MapPin, Building2, Calendar, ExternalLink, Bookmark, Check } from 'lucide-react'
+import { MapPin, Building2, Calendar, ExternalLink, Bookmark, Check, Globe, Workflow } from 'lucide-react'
 import { RecommendedJobEntry } from '@/types'
 import { toast } from 'sonner'
 
@@ -97,6 +97,26 @@ function SkillDiff({
   )
 }
 
+/** Remote / Onsite / Hybrid mode badge */
+function WorkModeBadge({ mode }: { mode?: string }) {
+  if (!mode) return null
+  if (mode === 'remote') return (
+    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+      <Globe className="w-2.5 h-2.5" /> Remote
+    </span>
+  )
+  if (mode === 'hybrid') return (
+    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-400 border border-amber-500/20">
+      <Workflow className="w-2.5 h-2.5" /> Hybrid
+    </span>
+  )
+  return (
+    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20">
+      <Building2 className="w-2.5 h-2.5" /> On-site
+    </span>
+  )
+}
+
 export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardProps) {
   const { job, match_score, matched_skills, missing_skills, job_id } = entry
   const [actioning, setActioning] = useState<'apply' | 'save' | null>(null)
@@ -113,8 +133,11 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
   const handleApply = () => {
     if (actioning || tracked) return
 
-    if (!job.application_url || !job.application_url.trim()) {
-      console.warn('[JobCard] Missing application_url for job:', job_id, job.title)
+    // Resolve apply URL: prefer the new unified apply_url, fall back to application_url (legacy)
+    const resolvedUrl = (job.apply_url || job.application_url || '').trim()
+
+    if (!resolvedUrl) {
+      console.warn('[JobCard] Missing apply_url for job:', job_id, job.title)
       toast.error('No application link for this listing', {
         style: {
           background: '#09090b',
@@ -126,11 +149,10 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
       return
     }
 
-    const rawUrl = job.application_url.trim()
     const targetUrl =
-      rawUrl.startsWith('http://') || rawUrl.startsWith('https://')
-        ? rawUrl
-        : `https://${rawUrl}`
+      resolvedUrl.startsWith('http://') || resolvedUrl.startsWith('https://')
+        ? resolvedUrl
+        : `https://${resolvedUrl}`
 
     // 1. Open tab synchronously inside user gesture handler BEFORE any async await
     window.open(targetUrl, '_blank', 'noopener,noreferrer')
@@ -196,16 +218,45 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
             <Building2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             <span className="text-sm text-muted-foreground truncate">{job.company}</span>
           </div>
+          {job.source === 'remotive' && (job.apply_url || job.application_url) && (
+            <a
+              href={(() => {
+                const u = (job.apply_url || job.application_url || '').trim()
+                return u.startsWith('http') ? u : `https://${u}`
+              })()}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center gap-1 text-[10px] text-blue-400/70 hover:text-blue-400 transition-colors mt-0.5"
+            >
+              <ExternalLink className="w-2.5 h-2.5" /> via Remotive ↗
+            </a>
+          )}
+          {job.source === 'adzuna' && (job.apply_url || job.application_url) && (
+            <a
+              href={(() => {
+                const u = (job.apply_url || job.application_url || '').trim()
+                return u.startsWith('http') ? u : `https://${u}`
+              })()}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center gap-1 text-[10px] text-violet-400/70 hover:text-violet-400 transition-colors mt-0.5"
+            >
+              <ExternalLink className="w-2.5 h-2.5" /> via Adzuna ↗
+            </a>
+          )}
         </div>
         <ScoreBadge score={match_score} />
       </div>
 
-      {/* Location + date */}
-      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+      {/* Location + date + work mode badge */}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <div className="flex items-center gap-1">
           <MapPin className="w-3 h-3 shrink-0" />
-          <span className="truncate max-w-[140px]">{job.location}</span>
+          <span className="truncate max-w-[120px]">{job.location}</span>
         </div>
+        <WorkModeBadge mode={job.work_mode} />
         {postedDate && (
           <div className="flex items-center gap-1 shrink-0">
             <Calendar className="w-3 h-3" />

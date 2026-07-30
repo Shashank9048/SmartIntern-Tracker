@@ -194,19 +194,35 @@ class NotificationScheduler:
 
     async def run_jobs_sync(self):
         """
-        Daily job sync: fetches Remotive + JSearch and upserts into DB.
+        Scheduled job sync: fetches Adzuna + Remotive + JSearch and upserts into DB.
         This is the scheduled counterpart to POST /jobs/sync.
 
-        Providers used (NO Adzuna):
-          - Remotive  : free, no auth, 6h in-memory cache (remote-only tech jobs)
-          - JSearch   : RAPIDAPI_KEY, ~23h rate-limit guard (India/on-site + remote)
-          - Mock      : fallback only when both live sources return 0 jobs
+        Provider schedule (all rate-limit guards respected by in-memory caches):
+          - Adzuna   : primary source, 8h in-memory cache (~3 actual fetches/day)
+          - Remotive : 6h in-memory cache (no more than ~4 syncs/day per ToS)
+          - JSearch  : 23h rate-limit guard (~1 actual fetch/day)
+          - Mock     : fallback only when ALL three live sources return 0 jobs
+
+        Direct-link pre-filter: only jobs with a real http(s):// apply URL are inserted.
         """
-        from api.routes.jobs import remotive_provider, jsearch_provider, mock_provider
+        from api.routes.jobs import adzuna_provider, remotive_provider, jsearch_provider, mock_provider
         from api.models import Job
-        logger.info("Scheduled job sync starting (Remotive + JSearch)...")
+        from services.jobs_provider import _is_real_url
+        logger.info("Scheduled job sync starting (Adzuna + Remotive + JSearch)...")
 
         fresh_jobs = []
+
+        # 1. Adzuna (primary)
+        try:
+            adzuna_jobs = await adzuna_provider.fetch_jobs(
+                query="software developer intern", location="India", limit=150
+            )
+            fresh_jobs.extend(adzuna_jobs)
+            logger.info(f"Scheduled sync: {len(adzuna_jobs)} from Adzuna")
+        except Exception as e:
+            logger.error(f"Scheduled sync Adzuna error: {e}")
+
+        # 2. Remotive
         try:
             remotive_jobs = await remotive_provider.fetch_jobs(limit=100)
             fresh_jobs.extend(remotive_jobs)
@@ -214,6 +230,7 @@ class NotificationScheduler:
         except Exception as e:
             logger.error(f"Scheduled sync Remotive error: {e}")
 
+        # 3. JSearch
         try:
             jsearch_jobs = await jsearch_provider.fetch_jobs(
                 query="software developer intern",
@@ -226,11 +243,14 @@ class NotificationScheduler:
             logger.error(f"Scheduled sync JSearch error: {e}")
 
         if not fresh_jobs:
-            logger.info("Scheduled sync: both live providers returned 0 jobs — using mock fallback")
+            logger.info("Scheduled sync: all live providers returned 0 jobs — using mock fallback")
             fresh_jobs = await mock_provider.fetch_jobs(limit=50)
 
         inserted = 0
         for fj in fresh_jobs:
+            # Hard-discard: skip jobs with no real apply URL
+            if not _is_real_url(getattr(fj, 'application_url', None)):
+                continue
             existing = None
             if fj.external_id:
                 existing = await Job.find_one(Job.external_id == fj.external_id)
@@ -250,8 +270,8 @@ class NotificationScheduler:
         self.scheduler.add_job(self.run_weekly_digest, "cron", day_of_week="mon", hour=9)
         # Deadline/interview reminders: every day at 8AM
         self.scheduler.add_job(self.run_deadline_reminders, "cron", hour=8)
-        # Scheduled job ingestion: every day at 6AM
+        # Scheduled job ingestion: every day at 6AM (Adzuna 8h cache, Remotive 6h cache, JSearch 23h guard)
         self.scheduler.add_job(self.run_jobs_sync, "cron", hour=6)
 
         self.scheduler.start()
-        logger.info("Notification + job sync scheduler started (weekly digest Mon 9AM, reminders 8AM, job sync 6AM).")
+        logger.info("Notification + job sync scheduler started (weekly digest Mon 9AM, reminders 8AM, job sync 6AM — Adzuna/Remotive/JSearch).")
