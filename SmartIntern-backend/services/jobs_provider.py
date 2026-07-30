@@ -1,3 +1,18 @@
+"""jobs_provider.py — Live job feed providers.
+
+Active providers (NO Adzuna):
+  • RemotiveProvider  — https://remotive.com/api/remote-jobs  (no auth, 6h cache)
+  • JSearchProvider   — RapidAPI JSearch (RAPIDAPI_KEY, ~23h rate-limit guard)
+  • MockJobsProvider  — local fixtures, fallback when both live sources are empty
+
+Source tags written to Job.source:
+  "remotive" | "jsearch" | "mock" | "manual"
+
+Work mode:
+  Remotive → always "remote"
+  JSearch  → "remote" if job_is_remote else "onsite"
+  Mock     → inferred from location string
+"""
 import os
 import httpx
 import logging
@@ -220,18 +235,22 @@ class MockJobsProvider(JobsProvider):
             posted_time = now - timedelta(days=i % 14, hours=i * 2)
             # Give every third mock job a future deadline (e.g. 15-30 days out)
             deadline_time = (now + timedelta(days=15 + (i % 15))) if (i % 3 == 0) else None
+            # Detect work mode from location string
+            loc = item.get("location", "")
+            work_mode = "remote" if "remote" in loc.lower() else "onsite"
             job = Job(
                 title=item["title"],
                 company=item["company"],
                 description=item["description"],
                 required_skills=item["required_skills"],
-                location=item["location"],
+                location=loc,
                 source=item["source"],
                 external_id=f"mock-{i}",
                 application_url=item["application_url"],
                 posted_at=posted_time,
                 deadline=deadline_time,
-                is_active=True
+                is_active=True,
+                work_mode=work_mode,
             )
             jobs.append(job)
             
@@ -309,7 +328,9 @@ class RemotiveProvider(JobsProvider):
                     posted_at = now
 
                 job = Job(
-                    title=item.get("job_type_label", item.get("title", "")).strip() or item.get("title", "").strip(),
+                    # Use 'title' directly — 'job_type_label' is a category string (e.g. "Full-Time"),
+                    # NOT the position title.
+                    title=item.get("title", "").strip(),
                     company=item.get("company_name", "").strip(),
                     description=(item.get("description", "") or "")[:2000],
                     required_skills=skills,
@@ -321,6 +342,7 @@ class RemotiveProvider(JobsProvider):
                     posted_at=posted_at,
                     deadline=None,
                     is_active=True,
+                    work_mode="remote",  # Remotive is a remote-only job board
                 )
                 jobs.append(job)
 
@@ -398,7 +420,8 @@ class JSearchProvider(JobsProvider):
                         application_url=result.get("job_apply_link", ""),
                         posted_at=datetime.fromisoformat(result["job_posted_at_datetime_utc"].replace("Z", "+00:00")) if result.get("job_posted_at_datetime_utc") else datetime.now(),
                         deadline=deadline,
-                        is_active=True
+                        is_active=True,
+                        work_mode="remote" if result.get("job_is_remote") else "onsite",
                     )
                     jobs.append(job)
 

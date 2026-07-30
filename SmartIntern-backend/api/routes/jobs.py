@@ -9,6 +9,7 @@ import logging
 from ..models import Job, Resume, UserJobMatch
 from ..auth import get_current_user
 from services.jobs_provider import MockJobsProvider, RemotiveProvider, JSearchProvider
+# NOTE: AdzunaProvider is intentionally NOT imported — Adzuna is not used in this project.
 
 logger = logging.getLogger(__name__)
 
@@ -170,43 +171,77 @@ async def sync_jobs(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Sync fresh job listings from Remotive + JSearch.
-    Marks jobs as is_active=False if they no longer appear in the fresh pull (delisted).
+    Sync fresh job listings from Remotive + JSearch (NO Adzuna).
+
+    Provider details:
+      - Remotive  : free, no auth, 6-hour in-memory cache. Always "remote" work_mode.
+      - JSearch   : RAPIDAPI_KEY required, ~23-hour rate-limit guard (~200 req/month free tier).
+      - Mock      : fallback only when BOTH live sources return 0 jobs.
+
+    After pulling fresh jobs:
+      - Jobs no longer returned by any provider are marked is_active=False (delisted).
+      - New jobs are inserted; existing ones (matched by external_id) are skipped.
+      - work_mode is updated on existing docs if the provider now returns a different value.
+
+    Remotive attribution ("via Remotive ↗") is rendered on the frontend job card;
+    no changes needed here for that requirement.
     """
+    provider_status: dict = {}
     fresh_jobs: list = []
 
-    # Remotive (freely callable)
+    # ── 1. Remotive (freely callable, 6h server-side cache) ───────────────────
     try:
         remotive_jobs = await remotive_provider.fetch_jobs(limit=100)
         fresh_jobs.extend(remotive_jobs)
+        provider_status["remotive"] = {"count": len(remotive_jobs), "status": "ok"}
         logger.info(f"Sync: got {len(remotive_jobs)} from Remotive")
     except Exception as e:
+        provider_status["remotive"] = {"count": 0, "status": f"error: {e}"}
         logger.error(f"Sync error from RemotiveProvider: {e}")
 
-    # JSearch (rate-limited)
-    try:
-        jsearch_jobs = await jsearch_provider.fetch_jobs(query="software intern", location="India", limit=50)
-        fresh_jobs.extend(jsearch_jobs)
-        logger.info(f"Sync: got {len(jsearch_jobs)} from JSearch")
-    except Exception as e:
-        logger.error(f"Sync error from JSearchProvider: {e}")
+    # ── 2. JSearch (RAPIDAPI_KEY, rate-limited ~23h) ──────────────────────────
+    jsearch_key = os.getenv("RAPIDAPI_KEY")
+    if not jsearch_key:
+        provider_status["jsearch"] = {"count": 0, "status": "skipped: RAPIDAPI_KEY not set"}
+        logger.warning("Sync: RAPIDAPI_KEY not set — JSearch skipped")
+    else:
+        try:
+            jsearch_jobs = await jsearch_provider.fetch_jobs(
+                query="software developer intern",
+                location="India",
+                limit=50,
+            )
+            fresh_jobs.extend(jsearch_jobs)
+            provider_status["jsearch"] = {"count": len(jsearch_jobs), "status": "ok"}
+            logger.info(f"Sync: got {len(jsearch_jobs)} from JSearch")
+        except Exception as e:
+            provider_status["jsearch"] = {"count": 0, "status": f"error: {e}"}
+            logger.error(f"Sync error from JSearchProvider: {e}")
 
-    # Fall back to mock if both live sources fail
+    # ── 3. Mock fallback ───────────────────────────────────────────────────────
+    used_mock = False
     if not fresh_jobs:
         fresh_jobs = await mock_provider.fetch_jobs(limit=50)
-        logger.info("Sync: using mock data fallback")
+        used_mock = True
+        provider_status["mock"] = {"count": len(fresh_jobs), "status": "fallback"}
+        logger.info("Sync: both live providers returned 0 jobs — using mock fallback")
+    else:
+        provider_status["mock"] = {"count": 0, "status": "not_needed"}
 
+    # ── 4. Delist jobs no longer returned by any provider ─────────────────────
     fresh_external_ids = {j.external_id for j in fresh_jobs if j.external_id}
-    fresh_signatures = {(j.company.lower().strip(), j.title.lower().strip()) for j in fresh_jobs}
+    fresh_signatures = {
+        (j.company.lower().strip(), j.title.lower().strip()) for j in fresh_jobs
+    }
 
     existing_db_jobs = await Job.find_all().to_list()
     delisted_count = 0
-    updated_count = 0
+    relisted_count = 0
 
     for db_job in existing_db_jobs:
         is_still_present = (
-            (db_job.external_id and db_job.external_id in fresh_external_ids) or
-            ((db_job.company.lower().strip(), db_job.title.lower().strip()) in fresh_signatures)
+            (db_job.external_id and db_job.external_id in fresh_external_ids)
+            or (db_job.company.lower().strip(), db_job.title.lower().strip()) in fresh_signatures
         )
         if not is_still_present:
             if db_job.is_active:
@@ -217,13 +252,26 @@ async def sync_jobs(
             if not db_job.is_active:
                 db_job.is_active = True
                 await db_job.save()
-                updated_count += 1
+                relisted_count += 1
+            # Update work_mode if the provider now sends a different value
+            fj_match = next(
+                (fj for fj in fresh_jobs if fj.external_id and fj.external_id == db_job.external_id),
+                None,
+            )
+            if fj_match and getattr(fj_match, "work_mode", None) and fj_match.work_mode != getattr(db_job, "work_mode", None):
+                db_job.work_mode = fj_match.work_mode
+                await db_job.save()
 
+    # ── 5. Upsert new jobs (skip if external_id already exists) ───────────────
     inserted_count = 0
     for fj in fresh_jobs:
-        existing = await Job.find_one(
-            (Job.external_id == fj.external_id) if fj.external_id else (Job.title == fj.title, Job.company == fj.company)
-        )
+        if fj.external_id:
+            existing = await Job.find_one(Job.external_id == fj.external_id)
+        else:
+            existing = await Job.find_one(
+                Job.title == fj.title,
+                Job.company == fj.company,
+            )
         if not existing:
             await fj.insert()
             inserted_count += 1
@@ -233,6 +281,9 @@ async def sync_jobs(
         "total_fresh": len(fresh_jobs),
         "inserted": inserted_count,
         "delisted": delisted_count,
+        "relisted": relisted_count,
+        "used_mock_fallback": used_mock,
+        "providers": provider_status,
     }
 
 
@@ -387,6 +438,8 @@ async def get_recommended_jobs(
                     "posted_at": job.posted_at.isoformat() if job.posted_at else None,
                     "deadline": job.deadline.isoformat() if job.deadline else None,
                     "is_active": job.is_active,
+                    "work_mode": getattr(job, "work_mode", "onsite"),
+                    "source": job.source,
                 },
             }
         )

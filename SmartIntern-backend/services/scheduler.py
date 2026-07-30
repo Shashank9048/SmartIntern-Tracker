@@ -19,6 +19,15 @@ else:
     _resend_available = False
     logger.info("RESEND_API_KEY not set — digest/reminder emails will use Gmail SMTP fallback.")
 
+# Warn at module load if neither email channel is configured
+_gmail_user = os.getenv("GMAIL_USER")
+_gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
+if not _resend_available and not (_gmail_user and _gmail_pass):
+    logger.warning(
+        "[scheduler] Neither RESEND_API_KEY nor GMAIL_USER+GMAIL_APP_PASSWORD are set. "
+        "Emails will be logged as [MOCK EMAIL] only and never actually sent."
+    )
+
 
 def _send_notification_email(to_email: str, subject: str, html_body: str) -> bool:
     """
@@ -75,7 +84,7 @@ class NotificationScheduler:
         Groups by user, sends email, creates Notification doc.
         """
         from api.models import UserJobMatch, Notification
-        logger.info("Running weekly digest job...")
+        logger.info("[scheduler] run_weekly_digest starting...")
         seven_days_ago = datetime.now() - timedelta(days=7)
 
         matches = await UserJobMatch.find(UserJobMatch.computed_at >= seven_days_ago).to_list()
@@ -84,6 +93,7 @@ class NotificationScheduler:
         for match in matches:
             user_match_counts[match.user_id] = user_match_counts.get(match.user_id, 0) + 1
 
+        sent_count = 0
         for user_email, count in user_match_counts.items():
             if count == 0:
                 continue
@@ -107,6 +117,12 @@ class NotificationScheduler:
             )
             sent = _send_notification_email(user_email, "Your Weekly Job Matches", html)
             logger.info(f"Digest for {user_email}: sent={sent}")
+            sent_count += 1
+
+        logger.info(
+            "[scheduler] run_weekly_digest complete. Users notified=%d, total matches=%d",
+            sent_count, len(matches)
+        )
 
     async def run_deadline_reminders(self):
         """
@@ -114,7 +130,7 @@ class NotificationScheduler:
         Creates Notification and sends email. Checks existing notifications to prevent duplicates.
         """
         from api.models import Application, Notification
-        logger.info("Running deadline/interview reminders job...")
+        logger.info("[scheduler] run_deadline_reminders starting...")
         now = datetime.now()
         upcoming_window = now + timedelta(hours=48)
 
@@ -125,20 +141,33 @@ class NotificationScheduler:
             ]
         }).to_list()
 
+        logger.info("[scheduler] Found %d apps with upcoming interview/deadlines", len(apps))
+        reminder_count = 0
         for app in apps:
             if app.interview_date and now <= app.interview_date <= upcoming_window:
                 await self._process_reminder(app, "interview", app.interview_date)
+                reminder_count += 1
             if hasattr(app, "deadline_date") and app.deadline_date and now <= app.deadline_date <= upcoming_window:
                 await self._process_reminder(app, "deadline", app.deadline_date)
+                reminder_count += 1
+
+        logger.info("[scheduler] run_deadline_reminders complete. Reminders processed=%d", reminder_count)
 
     async def _process_reminder(self, app, r_type: str, date_val: datetime):
         from api.models import Notification
-        # Deduplicate
+        # Deduplicate: check for existing notification of this type for this specific application
         existing = await Notification.find_one(
-            Notification.user_id == app.user_id,
-            Notification.type == r_type,
+            {
+                "user_id": app.user_id,
+                "type": r_type,
+                "payload.application_id": str(app.id),
+            }
         )
-        if existing and existing.payload.get("application_id") == str(app.id):
+        if existing:
+            logger.info(
+                "[scheduler] Skipping duplicate %s reminder for app %s (user %s)",
+                r_type, app.id, app.user_id
+            )
             return
 
         company = app.company_name
@@ -167,10 +196,15 @@ class NotificationScheduler:
         """
         Daily job sync: fetches Remotive + JSearch and upserts into DB.
         This is the scheduled counterpart to POST /jobs/sync.
+
+        Providers used (NO Adzuna):
+          - Remotive  : free, no auth, 6h in-memory cache (remote-only tech jobs)
+          - JSearch   : RAPIDAPI_KEY, ~23h rate-limit guard (India/on-site + remote)
+          - Mock      : fallback only when both live sources return 0 jobs
         """
         from api.routes.jobs import remotive_provider, jsearch_provider, mock_provider
         from api.models import Job
-        logger.info("Scheduled job sync starting...")
+        logger.info("Scheduled job sync starting (Remotive + JSearch)...")
 
         fresh_jobs = []
         try:
@@ -181,13 +215,18 @@ class NotificationScheduler:
             logger.error(f"Scheduled sync Remotive error: {e}")
 
         try:
-            jsearch_jobs = await jsearch_provider.fetch_jobs(query="software intern", location="India", limit=50)
+            jsearch_jobs = await jsearch_provider.fetch_jobs(
+                query="software developer intern",
+                location="India",
+                limit=50,
+            )
             fresh_jobs.extend(jsearch_jobs)
             logger.info(f"Scheduled sync: {len(jsearch_jobs)} from JSearch")
         except Exception as e:
             logger.error(f"Scheduled sync JSearch error: {e}")
 
         if not fresh_jobs:
+            logger.info("Scheduled sync: both live providers returned 0 jobs — using mock fallback")
             fresh_jobs = await mock_provider.fetch_jobs(limit=50)
 
         inserted = 0
@@ -195,6 +234,11 @@ class NotificationScheduler:
             existing = None
             if fj.external_id:
                 existing = await Job.find_one(Job.external_id == fj.external_id)
+            else:
+                existing = await Job.find_one(
+                    Job.title == fj.title,
+                    Job.company == fj.company,
+                )
             if not existing:
                 await fj.insert()
                 inserted += 1
