@@ -1,27 +1,42 @@
-﻿"""jobs_provider.py — Live job feed providers.
+"""jobs_provider.py — Live job feed providers (7-source engine).
 
-Active providers (Adzuna is PRIMARY):
-  • AdzunaProvider  — ADZUNA_APP_ID/ADZUNA_APP_KEY, maps redirect_url → application_url.
-                      ~1,000 calls/month free tier; 8h cache (≈3 syncs/day = ~90 calls/month).
-  • RemotiveProvider — https://remotive.com/api/remote-jobs  (no auth, 6h cache).
-                       Always "remote" work_mode. Remotive attribution required on cards.
-  • JSearchProvider  — RapidAPI JSearch (RAPIDAPI_KEY, ~23h rate-limit guard, ~200 req/month).
-  • MockJobsProvider  — local fixtures, fallback only when ALL live sources return 0 jobs.
+Provider priority order (highest → lowest for dedup tie-breaking):
+  1. ArbeitnowProvider   — https://www.arbeitnow.com/api/job-board-api (no auth, 3h cache).
+                           Native ATS links (Greenhouse/Lever/SmartRecruiters). TOP PRIORITY.
+  2. AdzunaProvider      — ADZUNA_APP_ID/ADZUNA_APP_KEY, maps redirect_url → application_url.
+                           ~1,000 calls/month free tier; 8h cache.
+  3. RemotiveProvider    — https://remotive.com/api/remote-jobs (no auth, 6h cache).
+                           Always "remote" work_mode. Remotive attribution required on cards.
+  4. JSearchProvider     — RapidAPI JSearch (RAPIDAPI_KEY, ~23h rate-limit guard, ~200 req/month).
+  5. HimalayasProvider   — https://himalayas.app/jobs/api (no auth, 3h cache).
+                           ⚠️  Free API only exposes himalayas.app internal URLs in
+                           applicationLink — these are NOT direct ATS links and are
+                           discarded by _get_direct_apply_url. Yields 0 until API exposes
+                           direct employer links.
+  6. JoobleProvider      — POST https://jooble.org/api/{JOOBLE_API_KEY}.
+                           ~500 req/day rate limit.
+  7. CareerOneStopProvider — https://api.careeronestop.org (CAREERONESTOP_USER_ID + TOKEN).
+                             US-only data; low yield for India searches.
+  8. MockJobsProvider    — local fixtures, fallback only when ALL live sources return 0 jobs.
 
 Source tags written to Job.source:
-  "adzuna" | "remotive" | "jsearch" | "mock" | "manual"
+  "arbeitnow" | "adzuna" | "remotive" | "jsearch" | "himalayas" | "jooble"
+  | "careeronestop" | "mock" | "manual"
 
 Work mode:
-  Adzuna  → "remote" if title/description contains "remote", else "onsite"
-  Remotive → always "remote"
-  JSearch  → "remote" if job_is_remote else "onsite"
-  Mock     → inferred from location string
+  Arbeitnow → "remote" if boolean remote==True, else inferred from text
+  Adzuna    → "remote" if title/description contains "remote", else "onsite"
+  Remotive  → always "remote"
+  JSearch   → "remote" if job_is_remote else "onsite"
+  Himalayas → always "remote" (remote-only board)
+  Jooble    → inferred from title/description/location text
+  Mock      → inferred from location string
 
 Direct-link rule (HARD DISCARD):
-  Every job MUST have a real application URL starting with http:// or https://.
-  Jobs missing a valid apply link are discarded at fetch time — they are never
-  stored in MongoDB and never shown in the app. The old Google-search fallback
-  is intentionally removed from the upsert/storage path.
+  Every job MUST have a real application URL starting with http:// or https://
+  that does NOT point to an internal job-board page (e.g. himalayas.app own pages).
+  Jobs failing this check are discarded at fetch time — they are never stored in
+  MongoDB and never shown in the app. No Google-search fallback is generated.
 """
 import os
 import re
@@ -52,20 +67,43 @@ def _is_real_url(url: Optional[str]) -> bool:
     return bool(_URL_RE.match(stripped)) and len(stripped) > 10
 
 
+# Internal job-board URL prefixes that are NOT direct employer ATS links.
+# Jobs with application URLs matching any of these are discarded.
+_INTERNAL_BOARD_URL_PREFIXES = (
+    "https://himalayas.app",
+    "http://himalayas.app",
+)
+
+
+def _is_direct_employer_url(url: str) -> bool:
+    """Return True only if the URL is a real URL AND is not an internal job-board page."""
+    if not _is_real_url(url):
+        return False
+    for prefix in _INTERNAL_BOARD_URL_PREFIXES:
+        if url.lower().startswith(prefix.lower()):
+            return False
+    return True
+
+
 def _get_direct_apply_url(raw: dict, source: str) -> Optional[str]:
     """
     Extract a REAL direct application URL from a raw job dict.
 
-    Source-specific priority:
-      Adzuna  → redirect_url
-      Remotive → url
-      JSearch  → job_apply_link → apply_options[0].apply_link
+    Source-specific field mapping (confirmed via live API testing 2026-07-31):
+      Arbeitnow    → url          (direct ATS link — Greenhouse/Lever/etc.) ✅
+      Adzuna       → redirect_url (direct employer redirect) ✅
+      Remotive     → url          (direct employer link) ✅
+      JSearch      → job_apply_link → apply_options[0].apply_link (ATS deeplink)
+      Himalayas    → applicationLink ⚠️ returns himalayas.app internal pages;
+                     filtered by _is_direct_employer_url → yields None → job discarded
+      Jooble       → link         (direct job link, confirmed from Jooble API docs)
+      CareerOneStop → JobURL      (from CareerOneStop API v1 response schema)
 
-    Returns the URL string if valid (starts with http/https), else None.
+    Returns the URL string if valid and direct, else None.
     Jobs returning None MUST be discarded — do not store them in MongoDB.
 
-    NOTE: The old Google-search fallback is intentionally ABSENT from this
-    function. A dead/missing link is worse than no job at all.
+    NOTE: No Google-search fallback is generated here. A missing link means
+    the job is silently dropped, never stored, never shown.
     """
     if source == "adzuna":
         candidate = raw.get("redirect_url") or raw.get("apply_url") or ""
@@ -84,6 +122,17 @@ def _get_direct_apply_url(raw: dict, source: str) -> Optional[str]:
                     first.get("url") or
                     ""
                 )
+    elif source == "arbeitnow":
+        candidate = raw.get("url") or ""
+    elif source == "himalayas":
+        # applicationLink field confirmed via live test — BUT it returns
+        # Himalayas' own internal listing pages (himalayas.app/companies/...),
+        # not direct employer ATS links. _is_direct_employer_url filters these out.
+        candidate = raw.get("applicationLink") or ""
+    elif source == "jooble":
+        candidate = raw.get("link") or ""
+    elif source == "careeronestop":
+        candidate = raw.get("JobURL") or ""
     else:
         # Generic fallback order for unknown sources
         candidate = (
@@ -94,7 +143,10 @@ def _get_direct_apply_url(raw: dict, source: str) -> Optional[str]:
             ""
         )
 
-    return candidate.strip() if _is_real_url(candidate) else None
+    stripped = candidate.strip() if candidate else ""
+    # Use _is_direct_employer_url which checks both valid URL format AND
+    # that it does not point to an internal job-board page (e.g. himalayas.app)
+    return stripped if _is_direct_employer_url(stripped) else None
 
 
 def _resolve_apply_url(raw: dict, source: str) -> str:
@@ -772,3 +824,327 @@ class MockJobsProvider(JobsProvider):
 
         return filtered[:limit]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ArbeitnowProvider
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ArbeitnowProvider(JobsProvider):
+    TTL_SECONDS = 3 * 3600
+    BASE_URL = "https://www.arbeitnow.com/api/job-board-api"
+
+    def __init__(self):
+        self._cache = []
+        self._cache_ts = 0.0
+
+    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
+        import time
+        now_ts = time.time()
+        if self._cache and (now_ts - self._cache_ts) < self.TTL_SECONDS:
+            jobs = self._cache
+        else:
+            jobs = await self._fetch_fresh(limit=limit)
+            self._cache = jobs
+            self._cache_ts = now_ts
+        return jobs[:limit]
+
+    async def _fetch_fresh(self, limit: int) -> List[Job]:
+        jobs = []
+        fetched = 0
+        discarded = 0
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                response = await client.get(self.BASE_URL)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            logger.error(f"Arbeitnow API request error: {str(e)}")
+            return []
+
+        now = datetime.now()
+        for item in data.get("data", []):
+            fetched += 1
+            apply_url = _get_direct_apply_url(item, "arbeitnow")
+            if not apply_url:
+                discarded += 1
+                continue
+
+            title = item.get("title", "Untitled Role")
+            company = item.get("company_name", "Unknown Company")
+            loc = item.get("location", "Remote")
+            desc = item.get("description", "")
+            work_mode = "remote" if item.get("remote") else _infer_work_mode_from_text(title, desc)
+            
+            posted_at = now
+            created_str = item.get("created_at")
+            if created_str:
+                try:
+                    posted_at = datetime.fromtimestamp(created_str)
+                except:
+                    pass
+            
+            jobs.append(Job(
+                title=title,
+                company=company,
+                location=loc,
+                description=desc,
+                application_url=apply_url,
+                source="arbeitnow",
+                external_id=f"arbeitnow-{item.get('slug')}",
+                work_mode=work_mode,
+                required_skills=[],
+                posted_at=posted_at,
+                is_active=True
+            ))
+
+        logger.info(
+            f"ArbeitnowProvider: fetched {fetched} raw, "
+            f"kept {len(jobs)} (discarded {discarded} no-link)"
+        )
+        return jobs
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HimalayasProvider
+# ─────────────────────────────────────────────────────────────────────────────
+
+class HimalayasProvider(JobsProvider):
+    """
+    Calls the Himalayas public API — no auth required.
+    GET https://himalayas.app/jobs/api?limit=100
+
+    ⚠️ KNOWN LIMITATION (verified 2026-07-31):
+    The free API only exposes applicationLink which returns Himalayas' own
+    internal listing pages (himalayas.app/companies/...), NOT direct employer
+    ATS links. All jobs are discarded by _get_direct_apply_url under the strict
+    direct-link rule. Yield = 0 until Himalayas exposes direct employer URLs.
+
+    Fields confirmed via live API test:
+      title, companyName, description, applicationLink (internal),
+      guid, pubDate (Unix epoch), expiryDate (Unix epoch),
+      locationRestrictions, employmentType, seniority, categories
+    """
+    TTL_SECONDS = 3 * 3600
+    BASE_URL = "https://himalayas.app/jobs/api"
+
+    def __init__(self):
+        self._cache = []
+        self._cache_ts = 0.0
+
+    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
+        import time
+        now_ts = time.time()
+        if self._cache and (now_ts - self._cache_ts) < self.TTL_SECONDS:
+            jobs = self._cache
+        else:
+            jobs = await self._fetch_fresh(limit=limit)
+            self._cache = jobs
+            self._cache_ts = now_ts
+        return jobs[:limit]
+
+    async def _fetch_fresh(self, limit: int) -> List[Job]:
+        jobs = []
+        fetched = 0
+        discarded = 0
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                response = await client.get(self.BASE_URL, params={"limit": 100})
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            logger.error(f"HimalayasProvider API request error: {str(e)}")
+            return []
+
+        now = datetime.now()
+        for item in data.get("jobs", []):
+            fetched += 1
+            # _get_direct_apply_url will reject himalayas.app internal URLs
+            apply_url = _get_direct_apply_url(item, "himalayas")
+            if not apply_url:
+                discarded += 1
+                logger.debug(
+                    f"HimalayasProvider: discarding '{item.get('title', '?')}' "
+                    f"@ '{item.get('companyName', '?')}' — applicationLink is "
+                    f"internal board URL: {str(item.get('applicationLink', ''))[:60]}"
+                )
+                continue
+
+            title = item.get("title", "Untitled Role")
+            company = item.get("companyName", "Unknown Company")
+            # Himalayas is remote-only; locationRestrictions lists allowed regions
+            restrictions = item.get("locationRestrictions") or []
+            loc = ", ".join(restrictions) if restrictions else "Remote"
+            desc = item.get("description") or item.get("excerpt", "")
+            work_mode = "remote"  # Himalayas is an exclusively remote job board
+
+            # pubDate and expiryDate are Unix epoch integers
+            posted_at = now
+            pub_epoch = item.get("pubDate")
+            if pub_epoch:
+                try:
+                    posted_at = datetime.fromtimestamp(int(pub_epoch))
+                except Exception:
+                    pass
+
+            deadline = None
+            expiry_epoch = item.get("expiryDate")
+            if expiry_epoch:
+                try:
+                    deadline = datetime.fromtimestamp(int(expiry_epoch))
+                except Exception:
+                    pass
+
+            # Extract skills from categories list
+            categories = item.get("categories") or []
+            skills = [c.replace("-", " ").title() for c in categories[:10]] if categories else []
+
+            jobs.append(Job(
+                title=title,
+                company=company,
+                location=loc,
+                description=desc[:2000] if desc else "",
+                application_url=apply_url,
+                source="himalayas",
+                external_id=f"himalayas-{item.get('guid', str(item.get('title', ''))[:40])}",
+                work_mode=work_mode,
+                required_skills=skills,
+                posted_at=posted_at,
+                deadline=deadline,
+                is_active=True
+            ))
+
+        logger.info(
+            f"HimalayasProvider: fetched {fetched} raw, "
+            f"kept {len(jobs)} (discarded {discarded} — internal board URLs rejected)"
+        )
+        return jobs
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JoobleProvider
+# ─────────────────────────────────────────────────────────────────────────────
+
+class JoobleProvider(JobsProvider):
+    BASE_URL = "https://jooble.org/api/"
+
+    def __init__(self):
+        self.api_key = os.getenv("JOOBLE_API_KEY", "")
+
+    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
+        if not self.api_key:
+            logger.warning("JoobleProvider: Credentials missing. Skipping.")
+            return []
+        
+        url = f"{self.BASE_URL}{self.api_key}"
+        payload = {"keywords": query or "software", "location": location or "India"}
+
+        jobs = []
+        fetched = 0
+        discarded = 0
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            logger.error(f"Jooble API request error: {str(e)}")
+            return []
+
+        now = datetime.now()
+        for item in data.get("jobs", []):
+            fetched += 1
+            apply_url = _get_direct_apply_url(item, "jooble")
+            if not apply_url:
+                discarded += 1
+                continue
+
+            title = item.get("title", "Untitled Role")
+            company = item.get("company", "Unknown Company")
+            loc = item.get("location", "Remote")
+            desc = item.get("snippet", "")
+            work_mode = _infer_work_mode_from_text(title, desc, loc)
+            
+            jobs.append(Job(
+                title=title,
+                company=company,
+                location=loc,
+                description=desc,
+                application_url=apply_url,
+                source="jooble",
+                external_id=f"jooble-{item.get('id', title+company)}",
+                work_mode=work_mode,
+                required_skills=[],
+                posted_at=now,
+                is_active=True
+            ))
+            
+        logger.info(
+            f"JoobleProvider: fetched {fetched} raw, "
+            f"kept {len(jobs)} (discarded {discarded} no-link)"
+        )
+        return jobs[:limit]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CareerOneStopProvider
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CareerOneStopProvider(JobsProvider):
+    BASE_URL = "https://api.careeronestop.org/v1/jobsearch"
+
+    def __init__(self):
+        self.user_id = os.getenv("CAREERONESTOP_USER_ID", "")
+        self.token = os.getenv("CAREERONESTOP_TOKEN", "")
+
+    async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
+        if not self.user_id or not self.token:
+            logger.warning("CareerOneStopProvider: Credentials missing. Skipping.")
+            return []
+            
+        kw = query or "software"
+        loc = location or "US"
+        url = f"{self.BASE_URL}/{self.user_id}/{kw}/{loc}/25/30/Date/1/{limit}/0"
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        jobs = []
+        fetched = 0
+        discarded = 0
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            logger.error(f"CareerOneStop API request error: {str(e)}")
+            return []
+
+        now = datetime.now()
+        for item in data.get("Jobs", []):
+            fetched += 1
+            apply_url = _get_direct_apply_url(item, "careeronestop")
+            if not apply_url:
+                discarded += 1
+                continue
+
+            title = item.get("JobTitle", "Untitled Role")
+            company = item.get("Company", "Unknown Company")
+            job_loc = item.get("Location", "US")
+            desc = ""
+            work_mode = _infer_work_mode_from_text(title, job_loc)
+            
+            jobs.append(Job(
+                title=title,
+                company=company,
+                location=job_loc,
+                description=desc,
+                application_url=apply_url,
+                source="careeronestop",
+                external_id=f"careeronestop-{item.get('JvId', title+company)}",
+                work_mode=work_mode,
+                required_skills=[],
+                posted_at=now,
+                is_active=True
+            ))
+
+        logger.info(
+            f"CareerOneStopProvider: fetched {fetched} raw, "
+            f"kept {len(jobs)} (discarded {discarded} no-link)"
+        )
+        return jobs[:limit]

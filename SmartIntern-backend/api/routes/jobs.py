@@ -8,7 +8,10 @@ import logging
 
 from ..models import Job, Resume, UserJobMatch
 from ..auth import get_current_user
-from services.jobs_provider import AdzunaProvider, MockJobsProvider, RemotiveProvider, JSearchProvider
+from services.jobs_provider import (
+    AdzunaProvider, MockJobsProvider, RemotiveProvider, JSearchProvider,
+    ArbeitnowProvider, HimalayasProvider, CareerOneStopProvider, JoobleProvider
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,10 @@ router = APIRouter(prefix="/jobs", tags=["Jobs"])
 adzuna_provider = AdzunaProvider()
 remotive_provider = RemotiveProvider()
 jsearch_provider = JSearchProvider()
+arbeitnow_provider = ArbeitnowProvider()
+himalayas_provider = HimalayasProvider()
+careeronestop_provider = CareerOneStopProvider()
+jooble_provider = JoobleProvider()
 mock_provider = MockJobsProvider()
 
 class JobCreate(BaseModel):
@@ -121,19 +128,29 @@ async def _extract_candidate_skills(user_email: str) -> tuple[Optional[str], Lis
 # normalize_job_item — unify apply links from all providers into apply_url
 # ─────────────────────────────────────────────────────────────────────────────
 
-def normalize_job_item(raw_job: dict, source: str) -> dict:
+def normalize_job_item(raw_job: dict, source: str) -> Optional[dict]:
     """
     Inspect a raw job dict from any provider and standardise it into a
-    flat payload with a guaranteed non-empty apply_url.
+    flat payload with a verified direct apply_url.
 
     Priority order for the apply link:
       1. job_apply_link   — JSearch primary field
-      2. url              — Remotive direct employer link
+      2. url              — Remotive/Arbeitnow direct employer link
       3. apply_options[0]["apply_link"] — JSearch ATS deeplink (often cleaner)
-      4. redirect_url     — reserved for future providers
+      4. redirect_url     — Adzuna direct link
       5. apply_url        — custom scraped sources
-      6. Google-search fallback — button is *never* broken
+      6. applicationLink  — Himalayas (rejected if himalayas.app internal URL)
+      7. link             — Jooble direct link
+      8. JobURL           — CareerOneStop
+
+    Returns None if no valid direct apply URL is found (strict direct-link rule).
+    Callers MUST check for None and skip/discard that job.
+    No Google Search fallback is ever generated.
     """
+    from services.jobs_provider import _get_direct_apply_url, _is_real_url
+
+    # Build a normalised raw dict that _get_direct_apply_url can process
+    # by checking all known field names across providers
     apply_url: str = (
         raw_job.get("job_apply_link") or
         raw_job.get("url") or
@@ -154,20 +171,23 @@ def normalize_job_item(raw_job: dict, source: str) -> dict:
                 ""
             )
 
-    # Final fallback: Google search — the Apply button is NEVER broken
-    if not apply_url or apply_url.strip() in ("", "Not specified"):
-        company = (
-            raw_job.get("employer_name") or
-            raw_job.get("company_name") or
-            raw_job.get("company") or
+    # Himalayas / Jooble / CareerOneStop fallback fields
+    if not apply_url:
+        apply_url = (
+            raw_job.get("applicationLink") or
+            raw_job.get("link") or
+            raw_job.get("JobURL") or
             ""
-        ).replace(" ", "+")
-        title = (
-            raw_job.get("job_title") or
-            raw_job.get("title") or
-            "Job"
-        ).replace(" ", "+")
-        apply_url = f"https://www.google.com/search?q={company}+{title}+careers+apply"
+        )
+
+    # Strict direct-link rule: discard if no real URL or if it's an internal board page
+    from services.jobs_provider import _is_direct_employer_url
+    if not apply_url or not _is_direct_employer_url(apply_url.strip()):
+        logger.debug(
+            f"normalize_job_item [{source}]: no valid direct apply URL for "
+            f"'{raw_job.get('job_title') or raw_job.get('title', '?')}' — discarding"
+        )
+        return None
 
     return {
         "job_title": raw_job.get("job_title") or raw_job.get("title", "Untitled Role"),
@@ -178,7 +198,7 @@ def normalize_job_item(raw_job: dict, source: str) -> dict:
             raw_job.get("location", "India / Remote")
         ),
         "source": source,
-        "apply_url": apply_url,   # ← unified field — frontend ONLY reads this
+        "apply_url": apply_url.strip(),   # ← unified field — frontend ONLY reads this
     }
 
 
@@ -197,40 +217,37 @@ async def get_jobs(
     Fetch current and upcoming jobs from providers/DB.
     Excludes expired deadlines, delisted jobs, and stale postings (>45 days).
     Also excludes any job lacking a real direct apply link.
-    Priority: Adzuna (primary) → Remotive → JSearch → Mock fallback.
+
+    Provider fetch order & dedup priority:
+      1. Arbeitnow  (TOP PRIORITY — native ATS links, no auth)
+      2. Adzuna     (ADZUNA_APP_ID/KEY required)
+      3. Remotive   (free, no auth, remote-only)
+      4. JSearch    (RAPIDAPI_KEY required)
+      5. Himalayas  (free, no auth — yields 0 under strict rule: free API returns internal URLs)
+      6. Jooble     (JOOBLE_API_KEY required)
+      7. CareerOneStop (CAREERONESTOP credentials required, US-only data)
+      8. Mock       (fallback when all live sources return 0)
     """
     jobs: list = []
 
-    # 1. Adzuna (primary — most generous free tier, India tech roles)
-    try:
-        adzuna_jobs = await adzuna_provider.fetch_jobs(query=query, location=location, limit=limit)
-        if adzuna_jobs:
-            logger.info(f"GET /jobs: got {len(adzuna_jobs)} jobs from Adzuna")
-            jobs.extend(adzuna_jobs)
-    except Exception as e:
-        logger.error(f"Adzuna fetch error: {e}")
+    async def _safe_fetch(provider, name, **kwargs):
+        try:
+            res = await provider.fetch_jobs(**kwargs)
+            if res:
+                logger.info(f"GET /jobs: got {len(res)} jobs from {name}")
+                jobs.extend(res)
+        except Exception as e:
+            logger.error(f"{name} fetch error: {e}")
 
-    # 2. Remotive (free, no auth, cached 6h — remote-only tech roles)
-    try:
-        remotive_jobs = await remotive_provider.fetch_jobs(query=query, location=location, limit=limit)
-        if remotive_jobs:
-            logger.info(f"GET /jobs: got {len(remotive_jobs)} jobs from Remotive")
-            jobs.extend(remotive_jobs)
-    except Exception as e:
-        logger.error(f"Remotive fetch error: {e}")
+    # Fetch sequentially (cached sources return quickly)
+    await _safe_fetch(arbeitnow_provider, "Arbeitnow", query=query, location=location, limit=limit)
+    await _safe_fetch(adzuna_provider, "Adzuna", query=query, location=location, limit=limit)
+    await _safe_fetch(remotive_provider, "Remotive", query=query, location=location, limit=limit)
+    await _safe_fetch(jsearch_provider, "JSearch", query=query or "software intern", location=location or "India", limit=limit)
+    await _safe_fetch(himalayas_provider, "Himalayas", query=query, location=location, limit=limit)
+    await _safe_fetch(jooble_provider, "Jooble", query=query, location=location, limit=limit)
+    await _safe_fetch(careeronestop_provider, "CareerOneStop", query=query, location=location, limit=limit)
 
-    # 3. JSearch supplement (rate-limited to ~1x/day, India local/on-site roles)
-    try:
-        jsearch_jobs = await jsearch_provider.fetch_jobs(
-            query=query or "software intern", location=location or "India", limit=limit
-        )
-        if jsearch_jobs:
-            logger.info(f"GET /jobs: got {len(jsearch_jobs)} jobs from JSearch")
-            jobs.extend(jsearch_jobs)
-    except Exception as e:
-        logger.error(f"JSearch fetch error: {e}")
-
-    # 4. Mock fallback (only when ALL live providers returned nothing)
     if not jobs:
         logger.info("No live jobs — falling back to MockJobsProvider")
         jobs = await mock_provider.fetch_jobs(query=query, location=location, limit=limit)
@@ -254,28 +271,28 @@ async def sync_jobs(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Sync fresh job listings from Adzuna (primary) + Remotive + JSearch.
+    Sync fresh job listings from all 7 live sources into MongoDB.
 
-    Provider details:
-      - Adzuna    : ADZUNA_APP_ID/ADZUNA_APP_KEY required. Primary source. 8h in-memory cache.
-                    Maps redirect_url → application_url. ~1,000 calls/month free tier.
-      - Remotive  : free, no auth, 6-hour in-memory cache. Always "remote" work_mode.
-                    Attribution badge required on card (rendered by frontend).
-      - JSearch   : RAPIDAPI_KEY required, ~23-hour rate-limit guard (~200 req/month free tier).
-                    Local/on-site India roles Adzuna/Remotive don't surface.
-      - Mock      : fallback only when ALL three live sources return 0 jobs.
+    Provider priority order (highest → lowest for cross-source dedup):
+      1. Arbeitnow    : no auth, 3h in-memory cache. Native ATS links (TOP PRIORITY).
+      2. Adzuna       : ADZUNA_APP_ID/KEY required. 8h in-memory cache. ~1,000 calls/month.
+      3. Remotive     : free, no auth, 6h cache. Always "remote" work_mode.
+      4. JSearch      : RAPIDAPI_KEY required. ~23h rate-limit guard (~200 req/month).
+      5. Himalayas    : free, no auth, 3h cache. Currently yields 0 (internal board URLs).
+      6. Jooble       : JOOBLE_API_KEY required. ~500 req/day limit.
+      7. CareerOneStop: CAREERONESTOP_USER_ID + TOKEN required. US-only data.
+      8. Mock         : fallback only when ALL seven live sources return 0 jobs.
 
     Direct-link rule (HARD DISCARD before upsert):
-      Any fetched job without a real http(s):// application_url is discarded before
-      being stored — it is never inserted into MongoDB.
+      Any fetched job without a real http(s):// application_url that is NOT an
+      internal job-board page is discarded before being stored. Never in MongoDB.
 
     Cross-source deduplication:
       If the same posting appears from multiple sources (matched by normalised
-      title + company), the Adzuna version is kept and the duplicate is counted
-      but not inserted.
+      title + company), the higher-priority source version is kept.
 
     After upserting fresh jobs:
-      - Jobs no longer returned by any provider are marked is_active=False (delisted).
+      - Jobs no longer returned by any provider are marked is_active=False.
       - Existing docs with changed work_mode are updated in place.
     """
     from services.jobs_provider import _is_real_url
@@ -286,119 +303,83 @@ async def sync_jobs(
         combined = f"{title.lower().strip()} {company.lower().strip()}"
         return _re.sub(r'[^a-z0-9 ]', '', combined).strip()
 
+
+
     provider_status: dict = {}
     fresh_jobs: list = []        # all valid (has real link) jobs from all sources
     discarded_total = 0
 
-    # ── 1. Adzuna (PRIMARY — synced first, most generous rate limit) ──────────
-    adzuna_key_set = bool(os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY"))
-    if not adzuna_key_set:
-        provider_status["adzuna"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "status": "skipped: ADZUNA_APP_ID/KEY not set"}
-        logger.warning("Sync: Adzuna credentials not set — Adzuna skipped")
-    else:
+    # Priority: Arbeitnow > Adzuna > Remotive > JSearch > Himalayas > Jooble > CareerOneStop
+
+    # Helper for dedup
+    combined_sigs = set()
+
+    async def _sync_provider(provider, name, **kwargs):
+        nonlocal cross_deduped_total
         try:
-            adzuna_jobs = await adzuna_provider.fetch_jobs(
-                query="software developer intern",
-                location="India",
-                limit=150,
-            )
-            # AdzunaProvider already hard-discards no-link jobs; count what came through
-            valid_adzuna = [j for j in adzuna_jobs if _is_real_url(j.application_url)]
-            fresh_jobs.extend(valid_adzuna)
-            provider_status["adzuna"] = {
-                "fetched": len(adzuna_jobs),
-                "kept": len(valid_adzuna),
-                "discarded_no_link": len(adzuna_jobs) - len(valid_adzuna),
-                "status": "ok",
-            }
-            logger.info(f"Sync: kept {len(valid_adzuna)} from Adzuna")
-        except Exception as e:
-            provider_status["adzuna"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "status": f"error: {e}"}
-            logger.error(f"Sync error from AdzunaProvider: {e}")
-
-    # Build Adzuna signature set for cross-source dedup (Adzuna wins)
-    adzuna_sigs = {
-        _normalise_sig(j.title, j.company)
-        for j in fresh_jobs
-        if j.source == "adzuna"
-    }
-
-    # ── 2. Remotive (freely callable, 6h server-side cache, remote-only) ──────
-    try:
-        remotive_raw = await remotive_provider.fetch_jobs(limit=100)
-        valid_remotive = [j for j in remotive_raw if _is_real_url(j.application_url)]
-        # Cross-source dedup: drop if already covered by Adzuna
-        deduped_remotive = []
-        cross_deduped_r = 0
-        for j in valid_remotive:
-            sig = _normalise_sig(j.title, j.company)
-            if sig in adzuna_sigs:
-                cross_deduped_r += 1
-            else:
-                deduped_remotive.append(j)
-        fresh_jobs.extend(deduped_remotive)
-        provider_status["remotive"] = {
-            "fetched": len(remotive_raw),
-            "kept": len(deduped_remotive),
-            "discarded_no_link": len(remotive_raw) - len(valid_remotive),
-            "deduped_cross_source": cross_deduped_r,
-            "status": "ok",
-        }
-        logger.info(f"Sync: kept {len(deduped_remotive)} from Remotive (cross-deduped {cross_deduped_r})")
-    except Exception as e:
-        provider_status["remotive"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": f"error: {e}"}
-        logger.error(f"Sync error from RemotiveProvider: {e}")
-
-    # ── 3. JSearch (RAPIDAPI_KEY, rate-limited ~23h, India local/on-site) ─────
-    jsearch_key = os.getenv("RAPIDAPI_KEY")
-    if not jsearch_key:
-        provider_status["jsearch"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: RAPIDAPI_KEY not set"}
-        logger.warning("Sync: RAPIDAPI_KEY not set — JSearch skipped")
-    else:
-        try:
-            jsearch_raw = await jsearch_provider.fetch_jobs(
-                query="software developer intern",
-                location="India",
-                limit=50,
-            )
-            valid_jsearch = [j for j in jsearch_raw if _is_real_url(j.application_url)]
-            # Cross-source dedup: Adzuna takes priority
-            combined_sigs = adzuna_sigs | {
-                _normalise_sig(j.title, j.company)
-                for j in fresh_jobs
-                if j.source == "remotive"
-            }
-            deduped_jsearch = []
-            cross_deduped_j = 0
-            for j in valid_jsearch:
+            raw_jobs = await provider.fetch_jobs(**kwargs)
+            valid_jobs = [j for j in raw_jobs if _is_real_url(j.application_url)]
+            
+            deduped = []
+            cross_deduped = 0
+            for j in valid_jobs:
                 sig = _normalise_sig(j.title, j.company)
                 if sig in combined_sigs:
-                    cross_deduped_j += 1
+                    cross_deduped += 1
                 else:
-                    deduped_jsearch.append(j)
-            fresh_jobs.extend(deduped_jsearch)
-            provider_status["jsearch"] = {
-                "fetched": len(jsearch_raw),
-                "kept": len(deduped_jsearch),
-                "discarded_no_link": len(jsearch_raw) - len(valid_jsearch),
-                "deduped_cross_source": cross_deduped_j,
+                    deduped.append(j)
+                    combined_sigs.add(sig)
+                    
+            fresh_jobs.extend(deduped)
+            provider_status[name.lower()] = {
+                "fetched": len(raw_jobs),
+                "kept": len(deduped),
+                "discarded_no_link": len(raw_jobs) - len(valid_jobs),
+                "deduped_cross_source": cross_deduped,
                 "status": "ok",
             }
-            logger.info(f"Sync: kept {len(deduped_jsearch)} from JSearch (cross-deduped {cross_deduped_j})")
+            logger.info(f"Sync: kept {len(deduped)} from {name} (cross-deduped {cross_deduped})")
         except Exception as e:
-            provider_status["jsearch"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": f"error: {e}"}
-            logger.error(f"Sync error from JSearchProvider: {e}")
+            provider_status[name.lower()] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": f"error: {e}"}
+            logger.error(f"Sync error from {name}Provider: {e}")
 
-    # ── 4. Mock fallback (only when ALL three live sources returned nothing) ───
+    cross_deduped_total = 0
+
+    await _sync_provider(arbeitnow_provider, "Arbeitnow", limit=150)
+    
+    if os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY"):
+        await _sync_provider(adzuna_provider, "Adzuna", query="software developer intern", location="India", limit=150)
+    else:
+        provider_status["adzuna"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: ADZUNA credentials not set"}
+
+    await _sync_provider(remotive_provider, "Remotive", limit=100)
+    
+    if os.getenv("RAPIDAPI_KEY"):
+        await _sync_provider(jsearch_provider, "JSearch", query="software developer intern", location="India", limit=50)
+    else:
+        provider_status["jsearch"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: RAPIDAPI_KEY not set"}
+
+    await _sync_provider(himalayas_provider, "Himalayas", limit=100)
+    
+    if os.getenv("JOOBLE_API_KEY"):
+        await _sync_provider(jooble_provider, "Jooble", query="software", location="India", limit=50)
+    else:
+        provider_status["jooble"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: JOOBLE_API_KEY not set"}
+
+    if os.getenv("CAREERONESTOP_USER_ID") and os.getenv("CAREERONESTOP_TOKEN"):
+        await _sync_provider(careeronestop_provider, "CareerOneStop", query="software", location="US", limit=50)
+    else:
+        provider_status["careeronestop"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: CAREERONESTOP credentials not set"}
+
     used_mock = False
     if not fresh_jobs:
         mock_jobs = await mock_provider.fetch_jobs(limit=50)
         fresh_jobs.extend(mock_jobs)
         used_mock = True
-        provider_status["mock"] = {"fetched": len(mock_jobs), "kept": len(mock_jobs), "discarded_no_link": 0, "status": "fallback"}
+        provider_status["mock"] = {"fetched": len(mock_jobs), "kept": len(mock_jobs), "discarded_no_link": 0, "deduped_cross_source": 0, "status": "fallback"}
         logger.info("Sync: all live providers returned 0 jobs — using mock fallback")
     else:
-        provider_status["mock"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "status": "not_needed"}
+        provider_status["mock"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "not_needed"}
 
     # ── 5. Delist jobs no longer returned by any provider ─────────────────────
     fresh_external_ids = {j.external_id for j in fresh_jobs if j.external_id}
@@ -600,6 +581,7 @@ async def get_recommended_jobs(
             continue
 
         seen_job_ids.add(match.job_id)
+        # normalize_job_item now returns None if no direct apply URL exists
         raw_for_norm = {
             "job_title": job.title,
             "employer_name": job.company,
@@ -607,9 +589,13 @@ async def get_recommended_jobs(
             "job_apply_link": job.application_url,
             "apply_url": job.application_url,
         }
-        apply_url_resolved = normalize_job_item(raw_for_norm, source=job.source).get("apply_url", "")
+        norm_result = normalize_job_item(raw_for_norm, source=job.source)
+        if not norm_result:
+            # No direct apply URL — discard under strict rule
+            continue
+        apply_url_resolved = norm_result.get("apply_url", "")
 
-        # Skip if job has no real apply URL (hard-discard rule for recommended feed)
+        # Extra safety guard (should already be filtered by normalize_job_item)
         if not apply_url_resolved or not apply_url_resolved.startswith("http"):
             continue
 
@@ -667,8 +653,8 @@ async def create_admin_job(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /api/jobs/today — normalised live feed (JSearch + Remotive, NO Adzuna)
-# Returns flat dicts with guaranteed apply_url for every card.
+# GET /api/jobs/today — normalised live feed from all active providers
+# Returns flat dicts with verified direct apply_url for every card.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/today")
@@ -679,105 +665,73 @@ async def get_today_jobs(
     current_user: str = Depends(get_current_user),
 ):
     """
-    Fetch a fresh, normalised list of today's live job postings from:
-      - Adzuna API (ADZUNA_APP_ID/KEY required, 8h cache, primary source)
-      - Remotive API (free, no auth, 6h cache)
-      - JSearch via RapidAPI (RAPIDAPI_KEY required, 23h rate-limit guard)
+    Fetch a fresh, normalised list of today's live job postings from all active providers.
 
-    Every item in the response is guaranteed to have a non-empty apply_url
-    (falls back to Google search for display-only cards — NOT persisted).
-    Jobs without a real direct link are never stored in MongoDB via /sync.
+    Provider order (same as /sync priority):
+      1. Arbeitnow (native ATS links, no auth)
+      2. Adzuna (ADZUNA_APP_ID/KEY)
+      3. Remotive (free, no auth)
+      4. JSearch (RAPIDAPI_KEY)
+      5. Himalayas (free, no auth — yields 0: internal board URLs)
+      6. Jooble (JOOBLE_API_KEY)
+      7. CareerOneStop (CAREERONESTOP credentials)
+
+    Strict direct-link rule: only jobs with a real direct apply URL are included.
+    No Google Search fallback is ever generated. Jobs without a real URL are discarded.
     """
-    import httpx
-
     jobs_list: list = []
+    seen_sigs: set = set()
 
-    # ── 1. Adzuna (primary source — India tech roles) ────────────────
-    adzuna_app_id = os.getenv("ADZUNA_APP_ID")
-    adzuna_app_key = os.getenv("ADZUNA_APP_KEY")
-    if not adzuna_app_id or not adzuna_app_key:
-        logger.warning("GET /jobs/today: ADZUNA_APP_ID/KEY not set — Adzuna skipped")
-    else:
+    async def _fetch_and_normalise(provider, name: str, **kwargs):
+        """Fetch jobs from a provider and normalise into flat dicts for the today feed."""
         try:
-            adzuna_url = f"https://api.adzuna.com/v1/api/jobs/in/search/1"
-            adzuna_params = {
-                "app_id": adzuna_app_id,
-                "app_key": adzuna_app_key,
-                "what": query,
-                "results_per_page": limit,
-                "sort_by": "date",
-            }
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(adzuna_url, params=adzuna_params)
-                resp.raise_for_status()
-                data = resp.json()
-            for item in data.get("results", []):
-                # For /today display path, use normalize_job_item which handles redirect_url
-                norm = normalize_job_item(
-                    {**item, "redirect_url": item.get("redirect_url", ""),
-                     "title": item.get("title", ""),
-                     "company_name": item.get("company", {}).get("display_name", ""),
-                     "location": item.get("location", {}).get("display_name", "")},
-                    source="Adzuna"
-                )
-                jobs_list.append(norm)
-            logger.info(f"GET /jobs/today: got {len(data.get('results', []))} from Adzuna")
+            fetched = await provider.fetch_jobs(**kwargs)
+            added = 0
+            for job in fetched:
+                sig = f"{job.title.lower().strip()}|{job.company.lower().strip()}"
+                if sig in seen_sigs:
+                    continue
+                # Jobs from providers already have application_url validated;
+                # re-run through normalize_job_item to get the flat dict shape
+                raw = {
+                    "job_title": job.title,
+                    "employer_name": job.company,
+                    "location": job.location,
+                    "job_apply_link": job.application_url,
+                    "apply_url": job.application_url,
+                    "source": job.source,
+                }
+                norm = normalize_job_item(raw, source=name)
+                if norm:  # None means no valid direct URL — discard
+                    jobs_list.append(norm)
+                    seen_sigs.add(sig)
+                    added += 1
+            logger.info(f"GET /jobs/today: {added} from {name}")
         except Exception as e:
-            logger.error(f"GET /jobs/today Adzuna error: {e}")
+            logger.error(f"GET /jobs/today {name} error: {e}")
 
-    # ── 2. Remotive (free, no-auth) ─────────────────────────────────
-    try:
-        remotive_url = "https://remotive.com/api/remote-jobs"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(remotive_url, params={"category": "software-dev", "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-        for item in data.get("jobs", []):
-            jobs_list.append(normalize_job_item(item, source="Remotive"))
-        logger.info(f"GET /jobs/today: got {len(data.get('jobs', []))} from Remotive")
-    except Exception as e:
-        logger.error(f"GET /jobs/today Remotive error: {e}")
+    # Priority order: Arbeitnow first
+    await _fetch_and_normalise(arbeitnow_provider, "Arbeitnow", limit=limit)
+    await _fetch_and_normalise(adzuna_provider, "Adzuna", query=query, location=location, limit=limit)
+    await _fetch_and_normalise(remotive_provider, "Remotive", query=query, limit=limit)
+    await _fetch_and_normalise(jsearch_provider, "JSearch", query=query or "software intern", location=location or "India", limit=limit)
+    await _fetch_and_normalise(himalayas_provider, "Himalayas", limit=limit)
+    await _fetch_and_normalise(jooble_provider, "Jooble", query=query, location=location, limit=limit)
+    await _fetch_and_normalise(careeronestop_provider, "CareerOneStop", query=query, location=location, limit=limit)
 
-    # ── 3. JSearch via RapidAPI (requires RAPIDAPI_KEY) ────────────
-    jsearch_key = os.getenv("RAPIDAPI_KEY")
-    if not jsearch_key:
-        logger.warning("GET /jobs/today: RAPIDAPI_KEY not set — JSearch skipped")
-    else:
-        try:
-            search_q = query
-            if location:
-                search_q += f" in {location}"
-            jsearch_url = "https://jsearch.p.rapidapi.com/search"
-            headers = {
-                "X-RapidAPI-Key": jsearch_key,
-                "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
-            }
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    jsearch_url,
-                    headers=headers,
-                    params={"query": search_q, "num_pages": "1"},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            for item in data.get("data", [])[:limit]:
-                jobs_list.append(normalize_job_item(item, source="JSearch"))
-            logger.info(f"GET /jobs/today: got {len(data.get('data', []))} from JSearch")
-        except Exception as e:
-            logger.error(f"GET /jobs/today JSearch error: {e}")
-
-    # ── 4. Mock fallback if all live sources returned nothing ─────────
+    # Mock fallback if all live sources returned nothing
     if not jobs_list:
         logger.info("GET /jobs/today: no live results — returning mock fallback")
         mock_jobs = await mock_provider.fetch_jobs(query=query, location=location, limit=limit)
         for mj in mock_jobs:
-            raw = {
-                "title": mj.title,
-                "company_name": mj.company,
-                "location": mj.location,
-                "apply_url": mj.application_url or "",
-            }
-            jobs_list.append(normalize_job_item(raw, source="Mock"))
+            if mj.application_url and mj.application_url.startswith("http"):
+                jobs_list.append({
+                    "job_title": mj.title,
+                    "company_name": mj.company,
+                    "location": mj.location,
+                    "source": "Mock",
+                    "apply_url": mj.application_url,
+                })
 
     return {
         "status": "success",

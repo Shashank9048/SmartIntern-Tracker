@@ -194,84 +194,133 @@ class NotificationScheduler:
 
     async def run_jobs_sync(self):
         """
-        Scheduled job sync: fetches Adzuna + Remotive + JSearch and upserts into DB.
+        Scheduled job sync: fetches all 7 live providers and upserts into DB.
         This is the scheduled counterpart to POST /jobs/sync.
 
-        Provider schedule (all rate-limit guards respected by in-memory caches):
-          - Adzuna   : primary source, 8h in-memory cache (~3 actual fetches/day)
-          - Remotive : 6h in-memory cache (no more than ~4 syncs/day per ToS)
-          - JSearch  : 23h rate-limit guard (~1 actual fetch/day)
-          - Mock     : fallback only when ALL three live sources return 0 jobs
+        Provider priority order (same as the manual sync endpoint):
+          1. Arbeitnow   : no auth, 3h cache — TOP PRIORITY, native ATS links
+          2. Adzuna      : ADZUNA_APP_ID/KEY, 8h cache (~1,000 calls/month)
+          3. Remotive    : free, no auth, 6h cache (max ~4 syncs/day)
+          4. JSearch     : RAPIDAPI_KEY, 23h rate-limit guard (~200 req/month)
+          5. Himalayas   : free, no auth, 3h cache (yields 0 under strict rule)
+          6. Jooble      : JOOBLE_API_KEY, ~500 req/day
+          7. CareerOneStop: US-only, low yield — CAREERONESTOP credentials
 
+        Schedule: every 3 hours (matches Arbeitnow/Himalayas 3h TTL)
         Direct-link pre-filter: only jobs with a real http(s):// apply URL are inserted.
         """
-        from api.routes.jobs import adzuna_provider, remotive_provider, jsearch_provider, mock_provider
+        import os as _os
+        import re as _re
+        from api.routes.jobs import (
+            arbeitnow_provider, adzuna_provider, remotive_provider, jsearch_provider,
+            himalayas_provider, jooble_provider, careeronestop_provider, mock_provider
+        )
         from api.models import Job
         from services.jobs_provider import _is_real_url
-        logger.info("Scheduled job sync starting (Adzuna + Remotive + JSearch)...")
 
-        fresh_jobs = []
+        logger.info("Scheduled job sync starting (7-source engine)...")
 
-        # 1. Adzuna (primary)
-        try:
-            adzuna_jobs = await adzuna_provider.fetch_jobs(
-                query="software developer intern", location="India", limit=150
-            )
-            fresh_jobs.extend(adzuna_jobs)
-            logger.info(f"Scheduled sync: {len(adzuna_jobs)} from Adzuna")
-        except Exception as e:
-            logger.error(f"Scheduled sync Adzuna error: {e}")
+        def _normalise_sig(title: str, company: str) -> str:
+            combined = f"{title.lower().strip()} {company.lower().strip()}"
+            return _re.sub(r'[^a-z0-9 ]', '', combined).strip()
 
-        # 2. Remotive
-        try:
-            remotive_jobs = await remotive_provider.fetch_jobs(limit=100)
-            fresh_jobs.extend(remotive_jobs)
-            logger.info(f"Scheduled sync: {len(remotive_jobs)} from Remotive")
-        except Exception as e:
-            logger.error(f"Scheduled sync Remotive error: {e}")
+        fresh_jobs: list = []
+        combined_sigs: set = set()
+        provider_status: dict = {}
 
-        # 3. JSearch
-        try:
-            jsearch_jobs = await jsearch_provider.fetch_jobs(
-                query="software developer intern",
-                location="India",
-                limit=50,
-            )
-            fresh_jobs.extend(jsearch_jobs)
-            logger.info(f"Scheduled sync: {len(jsearch_jobs)} from JSearch")
-        except Exception as e:
-            logger.error(f"Scheduled sync JSearch error: {e}")
+        async def _sync_provider(provider, name, **kwargs):
+            try:
+                raw_jobs = await provider.fetch_jobs(**kwargs)
+                valid_jobs = [j for j in raw_jobs if _is_real_url(j.application_url)]
+                deduped = []
+                cross_deduped = 0
+                for j in valid_jobs:
+                    sig = _normalise_sig(j.title, j.company)
+                    if sig in combined_sigs:
+                        cross_deduped += 1
+                    else:
+                        deduped.append(j)
+                        combined_sigs.add(sig)
+                fresh_jobs.extend(deduped)
+                provider_status[name.lower()] = {
+                    "fetched": len(raw_jobs), "kept": len(deduped),
+                    "discarded_no_link": len(raw_jobs) - len(valid_jobs),
+                    "deduped_cross_source": cross_deduped, "status": "ok",
+                }
+                logger.info(f"Scheduled sync: kept {len(deduped)} from {name} (cross-deduped {cross_deduped})")
+            except Exception as e:
+                provider_status[name.lower()] = {"fetched": 0, "kept": 0, "status": f"error: {e}"}
+                logger.error(f"Scheduled sync error from {name}: {e}")
 
+        # Fetch in priority order — each gated behind its env vars
+        await _sync_provider(arbeitnow_provider, "Arbeitnow", limit=150)
+
+        if _os.getenv("ADZUNA_APP_ID") and _os.getenv("ADZUNA_APP_KEY"):
+            await _sync_provider(adzuna_provider, "Adzuna", query="software developer intern", location="India", limit=150)
+        else:
+            provider_status["adzuna"] = {"fetched": 0, "kept": 0, "status": "skipped: credentials not set"}
+
+        await _sync_provider(remotive_provider, "Remotive", limit=100)
+
+        if _os.getenv("RAPIDAPI_KEY"):
+            await _sync_provider(jsearch_provider, "JSearch", query="software developer intern", location="India", limit=50)
+        else:
+            provider_status["jsearch"] = {"fetched": 0, "kept": 0, "status": "skipped: RAPIDAPI_KEY not set"}
+
+        await _sync_provider(himalayas_provider, "Himalayas", limit=100)
+
+        if _os.getenv("JOOBLE_API_KEY"):
+            await _sync_provider(jooble_provider, "Jooble", query="software", location="India", limit=50)
+        else:
+            provider_status["jooble"] = {"fetched": 0, "kept": 0, "status": "skipped: JOOBLE_API_KEY not set"}
+
+        if _os.getenv("CAREERONESTOP_USER_ID") and _os.getenv("CAREERONESTOP_TOKEN"):
+            await _sync_provider(careeronestop_provider, "CareerOneStop", query="software", location="US", limit=50)
+        else:
+            provider_status["careeronestop"] = {"fetched": 0, "kept": 0, "status": "skipped: credentials not set"}
+
+        # Mock fallback if all live providers returned nothing
         if not fresh_jobs:
-            logger.info("Scheduled sync: all live providers returned 0 jobs — using mock fallback")
-            fresh_jobs = await mock_provider.fetch_jobs(limit=50)
+            mock_jobs = await mock_provider.fetch_jobs(limit=50)
+            fresh_jobs.extend(mock_jobs)
+            provider_status["mock"] = {"fetched": len(mock_jobs), "kept": len(mock_jobs), "status": "fallback"}
+            logger.info("Scheduled sync: all live providers returned 0 — using mock fallback")
 
         inserted = 0
         for fj in fresh_jobs:
-            # Hard-discard: skip jobs with no real apply URL
             if not _is_real_url(getattr(fj, 'application_url', None)):
                 continue
             existing = None
             if fj.external_id:
                 existing = await Job.find_one(Job.external_id == fj.external_id)
             else:
-                existing = await Job.find_one(
-                    Job.title == fj.title,
-                    Job.company == fj.company,
-                )
+                existing = await Job.find_one(Job.title == fj.title, Job.company == fj.company)
             if not existing:
                 await fj.insert()
                 inserted += 1
 
-        logger.info(f"Scheduled job sync complete. Inserted {inserted} new jobs out of {len(fresh_jobs)} fetched.")
+        logger.info(
+            f"Scheduled job sync complete. "
+            f"total_fresh={len(fresh_jobs)}, inserted={inserted}. "
+            f"Providers: {provider_status}"
+        )
 
     def start(self):
         # Weekly digest: every Monday at 9AM
         self.scheduler.add_job(self.run_weekly_digest, "cron", day_of_week="mon", hour=9)
         # Deadline/interview reminders: every day at 8AM
         self.scheduler.add_job(self.run_deadline_reminders, "cron", hour=8)
-        # Scheduled job ingestion: every day at 6AM (Adzuna 8h cache, Remotive 6h cache, JSearch 23h guard)
-        self.scheduler.add_job(self.run_jobs_sync, "cron", hour=6)
+        # Scheduled job ingestion: every 3 hours
+        # Interval matches the shortest provider TTL (Arbeitnow=3h, Himalayas=3h).
+        # Remotive (6h) and Adzuna (8h) have longer TTLs and return cached results on
+        # intermediate runs, so they don't burn extra API quota.
+        self.scheduler.add_job(self.run_jobs_sync, "interval", hours=3)
 
         self.scheduler.start()
-        logger.info("Notification + job sync scheduler started (weekly digest Mon 9AM, reminders 8AM, job sync 6AM — Adzuna/Remotive/JSearch).")
+        logger.info(
+            "Notification + job sync scheduler started ("
+            "weekly digest Mon 9AM | reminders 8AM daily | "
+            "job sync every 3h — 7-source engine: "
+            "Arbeitnow(#1) > Adzuna > Remotive > JSearch > Himalayas > Jooble > CareerOneStop"
+            ")."
+        )
