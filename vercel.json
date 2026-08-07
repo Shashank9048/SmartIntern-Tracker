@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "SmartIntern-backend/api/index.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/auth/(.*)",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/ai/(.*)",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/user/(.*)",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/automation/(.*)",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/dashboard/(.*)",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/ping",
+      "dest": "SmartIntern-backend/api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
+  ]
+}
