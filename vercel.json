@@ -3,30 +3,6 @@
     {
       "source": "/api/(.*)",
       "destination": "/SmartIntern-backend/api/index.py"
-    },
-    {
-      "source": "/auth/(.*)",
-      "destination": "/SmartIntern-backend/api/index.py"
-    },
-    {
-      "source": "/ai/(.*)",
-      "destination": "/SmartIntern-backend/api/index.py"
-    },
-    {
-      "source": "/user/(.*)",
-      "destination": "/SmartIntern-backend/api/index.py"
-    },
-    {
-      "source": "/automation/(.*)",
-      "destination": "/SmartIntern-backend/api/index.py"
-    },
-    {
-      "source": "/dashboard/stats",
-      "destination": "/SmartIntern-backend/api/index.py"
-    },
-    {
-      "source": "/ping",
-      "destination": "/SmartIntern-backend/api/index.py"
     }
   ]
 }

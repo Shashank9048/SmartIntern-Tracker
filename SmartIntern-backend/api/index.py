@@ -234,14 +234,12 @@ for _env_var in ("ALLOWED_ORIGINS", "FRONTEND_URL"):
         if _origin and _origin not in _cors_origins:
             _cors_origins.append(_origin)
 
-# Automatically allow Vercel origins in serverless environment
-if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
-    if "*" not in _cors_origins:
-        _cors_origins.append("*")
+# Vercel origins are automatically handled by allow_origin_regex below.
+# (We do not append "*" to allow_origins because allow_credentials=True forbids it).
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins if "*" not in _cors_origins else ["*"],
+    allow_origins=_cors_origins,
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
@@ -263,17 +261,16 @@ app.mount("/static", StaticFiles(directory=os.path.join(current_dir, "static")),
 import json, re, ast
 
 
-@app.get("/")
+@app.get("/api/")
 def root():
     return {"status": "Backend Running", "modules": ["Auth", "AI", "CRUD", "Automation"]}
 
-@app.get("/ping")
+@app.get("/api/ping")
 def ping():
     return {"pong": True}
 
 # 1. AUTHENTICATION
 
-@app.post("/auth/signup", response_model=Token)
 @app.post("/api/auth/signup", response_model=Token)
 async def signup(user_data: UserSignup):
     try:
@@ -305,7 +302,6 @@ async def signup(user_data: UserSignup):
         print(f"❌ Signup Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/auth/login", response_model=Token)
 @app.post("/api/auth/login", response_model=Token)
 @limiter.limit("5/minute")
 async def login(request: Request, user_data: UserAuth):
@@ -319,7 +315,6 @@ async def login(request: Request, user_data: UserAuth):
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.get("/auth/me")
 @app.get("/api/auth/me")
 async def auth_me(current_user: str = Depends(get_current_user)):
     """Spec-required alias for GET /user/me — returns the authenticated user's profile."""
@@ -328,7 +323,6 @@ async def auth_me(current_user: str = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-@app.post("/auth/logout")
 @app.post("/api/auth/logout")
 async def logout(current_user: str = Depends(get_current_user)):
     """JWT is stateless — actual token invalidation is client-side.
@@ -353,7 +347,6 @@ class ResetPasswordRequest(BaseModel):
     otp: str
     new_password: str
 
-@app.post("/auth/forgot-password")
 @app.post("/api/auth/forgot-password")
 async def forgot_password(data: ForgotPasswordRequest):
     """Send a 6-digit OTP to the user's email for password reset."""
@@ -393,7 +386,6 @@ If you didn't request this, you can safely ignore this email.
     return {"message": "Reset code sent to your email."}
 
 
-@app.post("/auth/verify-otp")
 @app.post("/api/auth/verify-otp")
 async def verify_otp(data: VerifyOTPRequest):
     """Verify the OTP without resetting the password (pre-validation step)."""
@@ -412,7 +404,6 @@ async def verify_otp(data: VerifyOTPRequest):
     return {"message": "OTP verified"}
 
 
-@app.post("/auth/reset-password")
 @app.post("/api/auth/reset-password")
 async def reset_password(data: ResetPasswordRequest):
     """Verify OTP and update the user's password."""
@@ -449,7 +440,6 @@ class UpdateProfileRequest(BaseModel):
     preferences: Optional[dict] = None
     resume_text: Optional[str] = None
 
-@app.get("/user/me", response_model=User)
 @app.get("/api/user/me", response_model=User)
 async def get_current_user_profile(current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
@@ -457,7 +447,6 @@ async def get_current_user_profile(current_user: str = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-@app.patch("/user/me", response_model=User)
 @app.patch("/api/user/me", response_model=User)
 async def update_user_profile(data: UpdateProfileRequest, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
@@ -480,7 +469,6 @@ async def update_user_profile(data: UpdateProfileRequest, current_user: str = De
     await user.save()
     return user
 
-@app.delete("/user/me", status_code=204)
 @app.delete("/api/user/me", status_code=204)
 async def delete_account(current_user: str = Depends(get_current_user)):
     """Permanently delete the authenticated user's account and all associated data."""
@@ -541,7 +529,6 @@ async def delete_account(current_user: str = Depends(get_current_user)):
     return  # 204 No Content
 
 
-@app.post("/user/upload-avatar")
 @app.post("/api/user/upload-avatar")
 async def upload_avatar(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
@@ -572,7 +559,6 @@ async def upload_avatar(file: UploadFile = File(...), current_user: str = Depend
     
     return {"message": "Avatar uploaded successfully", "profile_picture_url": profile_url, "user": user}
 
-@app.post("/user/change-password")
 @app.post("/api/user/change-password")
 async def change_password(data: ChangePasswordRequest, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
@@ -586,7 +572,6 @@ async def change_password(data: ChangePasswordRequest, current_user: str = Depen
     await user.save()
     return {"message": "Password updated successfully"}
 
-@app.get("/dashboard/stats")
 @app.get("/api/dashboard/stats")
 async def get_dashboard_stats(current_user: str = Depends(get_current_user)):
     # FIXED: use user_id (not user_email)
@@ -659,7 +644,6 @@ async def create_followup(data: FollowUpRequest, current_user: str = Depends(get
 class ParseResumeRequest(BaseModel):
     resume_text: str
 
-@app.post("/ai/parse_resume")
 @app.post("/api/ai/parse_resume")
 async def api_parse_resume(req: ParseResumeRequest, current_user: str = Depends(get_current_user)):
     return await parse_resume_json(req.resume_text)
@@ -669,7 +653,6 @@ async def api_parse_resume(req: ParseResumeRequest, current_user: str = Depends(
 class ChatRequest(BaseModel):
     message: str
 
-@app.post("/ai/chat")
 @app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
@@ -712,13 +695,11 @@ async def ai_chat(req: ChatRequest, current_user: str = Depends(get_current_user
 class InterviewTipsRequest(BaseModel):
     position: str
 
-@app.post("/ai/interview-tips")
 @app.post("/api/ai/interview-tips")
 async def ai_interview_tips(req: InterviewTipsRequest, current_user: str = Depends(get_current_user)):
     return await get_interview_tips_ai(req.position)
 
 # 5. SMART AUTOMATION & REMINDERS
-@app.get("/automation/scan-inbox")
 @app.get("/api/automation/scan-inbox")
 async def scan_inbox_endpoint(current_user: str = Depends(get_current_user)):
     updates = scan_inbox_imap()
@@ -726,7 +707,6 @@ async def scan_inbox_endpoint(current_user: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=updates["error"])
     return {"updates": updates}
 
-@app.get("/automation/run")
 @app.get("/api/automation/run")
 async def run_automation(current_user: str = Depends(get_current_user)):
     # FIXED: use user_id (not user_email) and company_name (not company)
@@ -1010,7 +990,7 @@ class ResumeAnalyzeRequest(BaseModel):
 
 
 @app.post("/api/resume/upload")
-@app.post("/users/me/resume")
+@app.post("/api/users/me/resume")
 async def api_resume_upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1122,7 +1102,7 @@ async def api_resume_upload(
 
 
 @app.get("/api/resume/me")
-@app.get("/users/me/resume")
+@app.get("/api/users/me/resume")
 async def api_get_resume(current_user: str = Depends(get_current_user)):
     """
     Phase 2 — Return the user's stored structured Resume document with status.
@@ -1161,7 +1141,7 @@ async def api_get_resume(current_user: str = Depends(get_current_user)):
 
 
 @app.delete("/api/resume/me")
-@app.delete("/users/me/resume")
+@app.delete("/api/users/me/resume")
 async def api_delete_resume(current_user: str = Depends(get_current_user)):
     """
     Phase 2 — Hard Delete Resume:
@@ -1455,19 +1435,18 @@ async def delete_automation(auto_id: PydanticObjectId, current_user: str = Depen
 
 from .routes.jobs import router as jobs_router
 app.include_router(jobs_router, prefix="/api")
-app.include_router(jobs_router, prefix="")
 
 from .routes.tracked_jobs import router as tracked_jobs_router
-app.include_router(tracked_jobs_router)
+app.include_router(tracked_jobs_router, prefix="/api")
 
 from .routes.notifications import router as notifications_router
-app.include_router(notifications_router)
+app.include_router(notifications_router, prefix="/api")
 
 from .routes.ai import router as ai_router
-app.include_router(ai_router)
+app.include_router(ai_router, prefix="/api")
 
 from .routes.automation import router as automation_router
-app.include_router(automation_router)
+app.include_router(automation_router, prefix="/api")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
