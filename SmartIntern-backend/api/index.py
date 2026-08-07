@@ -187,9 +187,8 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️ WARNING: MONGODB_URL not found")
 
-    gmail_user = os.environ.get("GMAIL_USER")
-    gmail_user = os.environ.get("GMAIL_USER")
-    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
+    gmail_user = os.environ.get("GMAIL_USER") or os.environ.get("SMTP_SENDER")
+    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD") or os.environ.get("SMTP_PASSWORD")
     if not gmail_user or not gmail_pass:
         print("⚠️ WARNING: Gmail credentials not found. Set GMAIL_USER and GMAIL_APP_PASSWORD in .env for email automation.")
     else:
