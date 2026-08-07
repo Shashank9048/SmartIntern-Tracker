@@ -10,9 +10,8 @@ import { getUserProfile, updateUserProfile, changePassword, uploadAvatar, delete
 import { useAuth } from '@/context/auth-context'
 import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
-import { getApiBaseUrl } from '@/lib/api-client'
 
-const API_URL = typeof window !== 'undefined' ? getApiBaseUrl() : (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export default function SettingsPage() {
   const { refreshUser, logout } = useAuth()
