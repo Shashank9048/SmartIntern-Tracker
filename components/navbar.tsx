@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '@/context/auth-context'
 import { NotificationBell } from '@/components/notifications/notification-bell'
+import { getApiBaseUrl } from '@/lib/api-client'
 
 export function Navbar() {
   const { user } = useAuth()
@@ -17,7 +18,7 @@ export function Navbar() {
 
   const avatarContent = user?.profile_picture ? (
     <img
-      src={user.profile_picture.startsWith('http') ? user.profile_picture : `${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000'}${user.profile_picture}`}
+      src={user.profile_picture.startsWith('http') ? user.profile_picture : `${getApiBaseUrl()}${user.profile_picture}`}
       alt={user.full_name || 'User Avatar'}
       className="w-10 h-10 rounded-full object-cover border-2 border-primary/50"
     />

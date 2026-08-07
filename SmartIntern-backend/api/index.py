@@ -234,9 +234,15 @@ for _env_var in ("ALLOWED_ORIGINS", "FRONTEND_URL"):
         if _origin and _origin not in _cors_origins:
             _cors_origins.append(_origin)
 
+# Automatically allow Vercel origins in serverless environment
+if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+    if "*" not in _cors_origins:
+        _cors_origins.append("*")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=_cors_origins if "*" not in _cors_origins else ["*"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,5 +1,8 @@
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-const BASE_URL = API_URL;
+import { getApiBaseUrl } from '../../lib/api-client';
+
+export const getApiUrl = () => getApiBaseUrl();
+export const API_URL = typeof window !== 'undefined' ? getApiBaseUrl() : (process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000');
+const BASE_URL = typeof window !== 'undefined' ? getApiBaseUrl() : API_URL;
 
 export interface LoginResponse {
   access_token: string;
