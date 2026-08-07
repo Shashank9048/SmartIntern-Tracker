@@ -1,36 +1,25 @@
-# Environment variables / Secrets (CRITICAL)
-.env
-.env.*
-!.env.example
+# v0 runtime files (should only exist in preview, not in git)
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+instrumentation-client.js
+instrumentation-client.ts
 
-# Dependencies
+# Common ignores
 node_modules/
-.venv/
-venv/
-SmartIntern-backend/venv/
-
-# Next.js / Build outputs
 .next/
-out/
-build/
-dist/
-*.tsbuildinfo
-next-env.d.ts
-
-# Python / Cache
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-
-# Log & test output files
-*.log
-*_err.txt
-*_out.txt
-models_output.txt
-
-# System / IDE files
+.env*
 .DS_Store
 .vercel
-.vscode/
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Backup & Temporary Files
+*.bak
+*.log
+
+# Uploaded/Personal Files (Optional, adjust to your project needs)
+static/resumes/*.pdf
+*.pdf
