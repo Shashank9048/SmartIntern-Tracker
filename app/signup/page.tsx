@@ -15,9 +15,8 @@ import Link from 'next/link'
 import { Eye, EyeOff, X, Loader2, CheckCircle2 } from 'lucide-react'
 import { useAuth } from '@/context/auth-context'
 import { toast } from 'sonner'
-import { getApiBaseUrl } from '@/lib/api-client'
 
-const API_URL = typeof window !== 'undefined' ? getApiBaseUrl() : (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export default function SignupPage() {
   const [showPassword, setShowPassword] = useState(false)

@@ -13,7 +13,6 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/context/auth-context'
-import { getApiBaseUrl } from '@/lib/api-client'
 
 const menuItems = [
   { label: 'Dashboard', href: '/dashboard', icon: BarChart3 },
@@ -42,7 +41,7 @@ export function Sidebar() {
 
   const avatarContent = user?.profile_picture ? (
     <img
-      src={user.profile_picture.startsWith('http') ? user.profile_picture : `${getApiBaseUrl()}${user.profile_picture}`}
+      src={user.profile_picture.startsWith('http') ? user.profile_picture : `${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000'}${user.profile_picture}`}
       alt={user.full_name || 'User Avatar'}
       className="w-8 h-8 rounded-full object-cover border border-primary/30"
     />

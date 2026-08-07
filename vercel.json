@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/SmartIntern-backend/api/index.py"
-    }
-  ]
-}

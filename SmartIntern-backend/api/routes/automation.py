@@ -32,7 +32,7 @@ from ..auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/automation")
+router = APIRouter()
 
 
 # ─── Helper: Safe Port Parser ────────────────────────────────────────────────
@@ -114,7 +114,7 @@ class EmailPayload(BaseModel):
 
 # ─── POST /api/automation/send-cold-email ────────────────────────────────────
 
-@router.post("/send-cold-email")
+@router.post("/api/automation/send-cold-email")
 async def trigger_cold_email(
     payload: EmailPayload,
     background_tasks: BackgroundTasks,
@@ -180,7 +180,7 @@ async def trigger_cold_email(
 
 # ─── GET /api/automation/email-status ────────────────────────────────────────
 
-@router.get("/email-status")
+@router.get("/api/automation/email-status")
 async def email_service_status(current_user: Any = Depends(get_current_user)):
     """
     Health-check: returns whether SMTP credentials are configured.

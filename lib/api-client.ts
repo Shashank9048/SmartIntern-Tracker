@@ -1,21 +1,15 @@
-export function getApiBaseUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '')
-  }
-  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
-    return process.env.NEXT_PUBLIC_API_BASE_URL.replace(/\/$/, '')
-  }
-  return ''
-}
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'http://localhost:8000'
+).replace(/\/$/, '') // strip trailing slash to prevent double-slash URLs
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | boolean>
 }
 
 export class APIClient {
-  private static get baseURL() {
-    return getApiBaseUrl()
-  }
+  private static baseURL = API_BASE_URL
 
   static setToken(token: string | null) {
     if (token) {

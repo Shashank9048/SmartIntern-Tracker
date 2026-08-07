@@ -1,8 +1,5 @@
-import { getApiBaseUrl } from '../../lib/api-client';
-
-export const getApiUrl = () => getApiBaseUrl();
-export const API_URL = typeof window !== 'undefined' ? getApiBaseUrl() : (process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || '');
-const BASE_URL = typeof window !== 'undefined' ? getApiBaseUrl() : API_URL;
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const BASE_URL = API_URL;
 
 export interface LoginResponse {
   access_token: string;
@@ -15,7 +12,7 @@ export interface SignupResponse {
 }
 
 export const loginUser = async (email: string, password: string): Promise<LoginResponse> => {
-  const response = await fetch(`${BASE_URL}/api/auth/login`, {
+  const response = await fetch(`${BASE_URL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -37,7 +34,7 @@ export const signupUser = async (
 ): Promise<SignupResponse> => {
   try {
     const payload = { email, password, full_name, branch, graduation_year, skills: skills || [] };
-    const response = await fetch(`${BASE_URL}/api/auth/signup`, {
+    const response = await fetch(`${BASE_URL}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -94,7 +91,7 @@ export const getApplications = async (): Promise<any[]> => {
 
 export const getLatestAnalysis = async (): Promise<any> => {
   try {
-    const response = await fetch(`${BASE_URL}/api/ai/latest-analysis`, { headers: getAuthHeaders() });
+    const response = await fetch(`${BASE_URL}/ai/latest-analysis`, { headers: getAuthHeaders() });
     if (response.status === 404) return null; // No analysis yet — graceful
     if (!response.ok) throw new Error('Failed to fetch latest analysis');
     return response.json();
@@ -109,7 +106,7 @@ export const getLatestAnalysis = async (): Promise<any> => {
 };
 
 export const parseResume = async (resumeText: string): Promise<any> => {
-  const response = await fetch(`${BASE_URL}/api/ai/parse_resume`, {
+  const response = await fetch(`${BASE_URL}/ai/parse_resume`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({ resume_text: resumeText }),
@@ -144,7 +141,7 @@ export const uploadAvatar = async (file: File): Promise<{ profile_picture_url: s
   const token = localStorage.getItem('access_token');
   const formData = new FormData();
   formData.append('file', file);
-  const response = await fetch(`${BASE_URL}/api/user/upload-avatar`, {
+  const response = await fetch(`${BASE_URL}/user/upload-avatar`, {
     method: 'POST',
     headers: {
       // Do NOT set Content-Type — browser sets it automatically with multipart boundary
@@ -181,7 +178,7 @@ export const getUserProfile = async (): Promise<UserProfile> => {
     throw new Error('getUserProfile called on server — skipping');
   }
   try {
-    const response = await fetch(`${BASE_URL}/api/user/me`, {
+    const response = await fetch(`${BASE_URL}/user/me`, {
       method: 'GET',
       headers: getAuthHeaders(),
     });
@@ -201,7 +198,7 @@ export const getUserProfile = async (): Promise<UserProfile> => {
 };
 
 export const updateUserProfile = async (data: Partial<UserProfile> & { password?: string }): Promise<UserProfile> => {
-  const response = await fetch(`${BASE_URL}/api/user/me`, {
+  const response = await fetch(`${BASE_URL}/user/me`, {
     method: 'PATCH',
     headers: getAuthHeaders(),
     body: JSON.stringify(data),
@@ -214,7 +211,7 @@ export const updateUserProfile = async (data: Partial<UserProfile> & { password?
 };
 
 export const changePassword = async (currentPassword: string, newPassword: string): Promise<void> => {
-  const response = await fetch(`${BASE_URL}/api/user/change-password`, {
+  const response = await fetch(`${BASE_URL}/user/change-password`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
@@ -338,7 +335,7 @@ export const deleteResume = async (): Promise<void> => {
 // --- AI Chat ---
 
 export const chatWithAI = async (message: string): Promise<string> => {
-  const response = await fetch(`${BASE_URL}/api/ai/chat`, {
+  const response = await fetch(`${BASE_URL}/ai/chat`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({ message }),
@@ -354,7 +351,7 @@ export const chatWithAI = async (message: string): Promise<string> => {
 };
 
 export const deleteUserProfile = async (): Promise<void> => {
-  const response = await fetch(`${BASE_URL}/api/user/me`, {
+  const response = await fetch(`${BASE_URL}/user/me`, {
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
@@ -370,7 +367,7 @@ export const deleteUserProfile = async (): Promise<void> => {
  */
 export const logoutUser = async (): Promise<void> => {
   try {
-    const response = await fetch(`${BASE_URL}/api/auth/logout`, {
+    const response = await fetch(`${BASE_URL}/auth/logout`, {
       method: 'POST',
       headers: getAuthHeaders(),
     });
@@ -388,7 +385,7 @@ export const logoutUser = async (): Promise<void> => {
  * Returns the authenticated user's full profile.
  */
 export const getAuthMe = async (): Promise<UserProfile> => {
-  const response = await fetch(`${BASE_URL}/api/auth/me`, {
+  const response = await fetch(`${BASE_URL}/auth/me`, {
     method: 'GET',
     headers: getAuthHeaders(),
   });

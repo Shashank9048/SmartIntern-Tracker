@@ -6,9 +6,8 @@ import { Input } from '@/components/ui/input'
 import Link from 'next/link'
 import { Mail, ArrowLeft, Loader2, CheckCircle2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { getApiBaseUrl } from '@/lib/api-client'
 
-const API_URL = typeof window !== 'undefined' ? getApiBaseUrl() : (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 type Step = 'email' | 'otp' | 'new-password' | 'done'
 

@@ -20,7 +20,7 @@ from ..ai_utils import get_gemini_response, analyze_resume_match
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/ai")
+router = APIRouter()
 
 
 # ─── Request / Response Models ────────────────────────────────────────────────
@@ -54,7 +54,7 @@ def _parse_gemini_json(raw: str) -> dict:
 
 # ─── POST /api/ai/analyze-resume ─────────────────────────────────────────────
 
-@router.post("/analyze-resume")
+@router.post("/api/ai/analyze-resume")
 async def analyze_resume(
     payload: ResumeAnalysisRequest,
     current_user: str = Depends(get_current_user),
@@ -116,7 +116,7 @@ Resume Text:
 
 # ─── POST /api/ai/match-job ───────────────────────────────────────────────────
 
-@router.post("/match-job")
+@router.post("/api/ai/match-job")
 async def match_job(
     payload: JobMatchRequest,
     current_user: str = Depends(get_current_user),
@@ -186,7 +186,7 @@ Job Description:
 
 # ─── POST /api/ai/generate-cold-email ─────────────────────────────────────────
 
-@router.post("/generate-cold-email")
+@router.post("/api/ai/generate-cold-email")
 async def generate_cold_email_endpoint(
     payload: ColdEmailRequest,
     current_user: str = Depends(get_current_user),
