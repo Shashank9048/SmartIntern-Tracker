@@ -274,6 +274,7 @@ def ping():
 # 1. AUTHENTICATION
 
 @app.post("/auth/signup", response_model=Token)
+@app.post("/api/auth/signup", response_model=Token)
 async def signup(user_data: UserSignup):
     try:
         # Check if email exists
@@ -305,6 +306,7 @@ async def signup(user_data: UserSignup):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/login", response_model=Token)
+@app.post("/api/auth/login", response_model=Token)
 @limiter.limit("5/minute")
 async def login(request: Request, user_data: UserAuth):
     """
@@ -318,6 +320,7 @@ async def login(request: Request, user_data: UserAuth):
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/auth/me")
+@app.get("/api/auth/me")
 async def auth_me(current_user: str = Depends(get_current_user)):
     """Spec-required alias for GET /user/me — returns the authenticated user's profile."""
     user = await User.find_one(User.email == current_user)
@@ -326,6 +329,7 @@ async def auth_me(current_user: str = Depends(get_current_user)):
     return user
 
 @app.post("/auth/logout")
+@app.post("/api/auth/logout")
 async def logout(current_user: str = Depends(get_current_user)):
     """JWT is stateless — actual token invalidation is client-side.
     This endpoint exists so the frontend can call it to ack logout
@@ -350,6 +354,7 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 @app.post("/auth/forgot-password")
+@app.post("/api/auth/forgot-password")
 async def forgot_password(data: ForgotPasswordRequest):
     """Send a 6-digit OTP to the user's email for password reset."""
     user = await User.find_one(User.email == data.email)
@@ -389,6 +394,7 @@ If you didn't request this, you can safely ignore this email.
 
 
 @app.post("/auth/verify-otp")
+@app.post("/api/auth/verify-otp")
 async def verify_otp(data: VerifyOTPRequest):
     """Verify the OTP without resetting the password (pre-validation step)."""
     user = await User.find_one(User.email == data.email)
@@ -407,6 +413,7 @@ async def verify_otp(data: VerifyOTPRequest):
 
 
 @app.post("/auth/reset-password")
+@app.post("/api/auth/reset-password")
 async def reset_password(data: ResetPasswordRequest):
     """Verify OTP and update the user's password."""
     user = await User.find_one(User.email == data.email)
@@ -443,6 +450,7 @@ class UpdateProfileRequest(BaseModel):
     resume_text: Optional[str] = None
 
 @app.get("/user/me", response_model=User)
+@app.get("/api/user/me", response_model=User)
 async def get_current_user_profile(current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
     if not user:
@@ -450,6 +458,7 @@ async def get_current_user_profile(current_user: str = Depends(get_current_user)
     return user
 
 @app.patch("/user/me", response_model=User)
+@app.patch("/api/user/me", response_model=User)
 async def update_user_profile(data: UpdateProfileRequest, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
     if not user:
@@ -472,6 +481,7 @@ async def update_user_profile(data: UpdateProfileRequest, current_user: str = De
     return user
 
 @app.delete("/user/me", status_code=204)
+@app.delete("/api/user/me", status_code=204)
 async def delete_account(current_user: str = Depends(get_current_user)):
     """Permanently delete the authenticated user's account and all associated data."""
     user = await User.find_one(User.email == current_user)
@@ -532,6 +542,7 @@ async def delete_account(current_user: str = Depends(get_current_user)):
 
 
 @app.post("/user/upload-avatar")
+@app.post("/api/user/upload-avatar")
 async def upload_avatar(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
     if not user:
@@ -562,6 +573,7 @@ async def upload_avatar(file: UploadFile = File(...), current_user: str = Depend
     return {"message": "Avatar uploaded successfully", "profile_picture_url": profile_url, "user": user}
 
 @app.post("/user/change-password")
+@app.post("/api/user/change-password")
 async def change_password(data: ChangePasswordRequest, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
     if not user:
@@ -575,6 +587,7 @@ async def change_password(data: ChangePasswordRequest, current_user: str = Depen
     return {"message": "Password updated successfully"}
 
 @app.get("/dashboard/stats")
+@app.get("/api/dashboard/stats")
 async def get_dashboard_stats(current_user: str = Depends(get_current_user)):
     # FIXED: use user_id (not user_email)
     apps = await Application.find(Application.user_id == current_user).to_list()
@@ -647,6 +660,7 @@ class ParseResumeRequest(BaseModel):
     resume_text: str
 
 @app.post("/ai/parse_resume")
+@app.post("/api/ai/parse_resume")
 async def api_parse_resume(req: ParseResumeRequest, current_user: str = Depends(get_current_user)):
     return await parse_resume_json(req.resume_text)
 
@@ -656,6 +670,7 @@ class ChatRequest(BaseModel):
     message: str
 
 @app.post("/ai/chat")
+@app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
     if not user:
@@ -698,11 +713,13 @@ class InterviewTipsRequest(BaseModel):
     position: str
 
 @app.post("/ai/interview-tips")
+@app.post("/api/ai/interview-tips")
 async def ai_interview_tips(req: InterviewTipsRequest, current_user: str = Depends(get_current_user)):
     return await get_interview_tips_ai(req.position)
 
 # 5. SMART AUTOMATION & REMINDERS
 @app.get("/automation/scan-inbox")
+@app.get("/api/automation/scan-inbox")
 async def scan_inbox_endpoint(current_user: str = Depends(get_current_user)):
     updates = scan_inbox_imap()
     if isinstance(updates, dict) and "error" in updates:
@@ -710,6 +727,7 @@ async def scan_inbox_endpoint(current_user: str = Depends(get_current_user)):
     return {"updates": updates}
 
 @app.get("/automation/run")
+@app.get("/api/automation/run")
 async def run_automation(current_user: str = Depends(get_current_user)):
     # FIXED: use user_id (not user_email) and company_name (not company)
     apps = await Application.find(Application.user_id == current_user).to_list()
