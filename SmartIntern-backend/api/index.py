@@ -33,13 +33,14 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 # Robust .env loading
 current_dir = os.path.dirname(os.path.abspath(__file__))
-while current_dir != os.path.dirname(current_dir): # Stop at root
-    env_path = os.path.join(current_dir, ".env")
+search_dir = current_dir
+while search_dir != os.path.dirname(search_dir): # Stop at root
+    env_path = os.path.join(search_dir, ".env")
     if os.path.exists(env_path):
         load_dotenv(env_path)
         print(f"✅ Loaded .env from: {env_path}")
         break
-    current_dir = os.path.dirname(current_dir)
+    search_dir = os.path.dirname(search_dir)
 else:
     print("⚠️ WARNING: .env file not found in any parent directory")
 
