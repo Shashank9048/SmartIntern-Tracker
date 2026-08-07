@@ -21,67 +21,106 @@ import ast
 
 logger = logging.getLogger(__name__)
 
-AVAILABLE_MODELS = [
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-flash-latest',
+# ── Confirmed-working models (tested 2026-08-04, ordered by preference) ─────────
+# Verified live against this API key – models that return generateContent.
+# gemini-3.x series have their own free-tier quotas (unexhausted).
+# gemini-2.x series are quota-exhausted on the free tier; kept as last-resort
+# fallback in case daily quotas reset mid-day.
+DEFAULT_MODELS = [
+    # --- Confirmed working (tested 2026-08-04) ---
+    'gemini-3.5-flash',            # Best quality among working models
+    'gemini-3.6-flash',            # Slightly newer backup
+    'gemini-3.5-flash-lite',       # Faster/lighter version
+    'gemini-3.1-flash-lite',       # Stable, confirmed working
+    'gemini-flash-lite-latest',    # Latest flash-lite alias
+    'gemini-flash-latest',         # Latest flash alias
+    'gemini-3.1-flash-lite-preview',  # Preview fallback
+    'gemini-3-flash-preview',      # Older preview, confirmed working
+    # --- Quota-exhausted on free tier (fallback when quotas reset) ---
+    'gemini-2.5-flash',            # Quota exhausted but real model
+    'gemini-2.0-flash',            # Quota exhausted but real model
+    'gemini-2.0-flash-lite',       # Quota exhausted but real model
 ]
 
-async def get_gemini_response(prompt: str, retries: int = 3, delay: int = 5):
+# Allow overriding the primary model via env variable (insert it at position 0)
+# NOTE: Do NOT set GEMINI_MODEL to old models like gemini-1.5-flash (removed from API).
+env_model = os.environ.get("GEMINI_MODEL", "").strip()
+if env_model and env_model not in DEFAULT_MODELS:
+    AVAILABLE_MODELS = [env_model] + DEFAULT_MODELS
+elif env_model:
+    AVAILABLE_MODELS = [env_model] + [m for m in DEFAULT_MODELS if m != env_model]
+else:
+    AVAILABLE_MODELS = DEFAULT_MODELS
+
+
+async def get_gemini_response(prompt: str, retries: int = 2, delay: int = 2):
+    """
+    Calls Gemini with automatic model fallback.
+    Tries each model in AVAILABLE_MODELS in order.
+    - 404 NOT_FOUND  → immediately skip to next model (model removed/deprecated)
+    - 429 RESOURCE_EXHAUSTED → skip to next model (quota exceeded)
+    - Other errors   → log and skip to next model
+    Returns the text response, or an Error: prefixed string.
+    """
     if not client:
         return "Error: Gemini API Key not configured."
-        
+
     last_error = None
-    
-    # Try each model in the list
+
     for model_name in AVAILABLE_MODELS:
-        try:
-            for attempt in range(retries):
-                try:
-                    # New google-genai syntax requires async wrap or native async client
-                    response = await asyncio.to_thread(
-                        client.models.generate_content,
-                        model=model_name,
-                        contents=prompt,
-                    )
+        for attempt in range(retries):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and hasattr(response, 'text') and response.text:
+                    logger.info(f"[Gemini] Success with model '{model_name}' (attempt {attempt + 1})")
                     return response.text
-                except Exception as e:
-                    error_str = str(e)
-                    last_error = e
-                    
-                    if "429" in error_str or "quota" in error_str.lower():
-                        match_seconds = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", error_str)
-                        match_text_seconds = re.search(r"retry in (\d+\.?\d*)s", error_str)
-                        
-                        wait_time = delay * (2 ** attempt)
-                        
-                        if match_seconds:
-                            wait_time = int(match_seconds.group(1)) + 1
-                        elif match_text_seconds:
-                            wait_time = float(match_text_seconds.group(1)) + 1
-                            
-                        if attempt == 0 and model_name != AVAILABLE_MODELS[-1]:
-                            print(f"⚠️ Quota exceeded on {model_name}. Switching model...")
-                            break 
-                            
-                        print(f"⚠️ Quota exceeded on {model_name}. Retrying in {wait_time:.1f}s...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    
-                    print(f"❌ Gemini Error ({model_name}): {e}")
-                    break 
+                # Empty response — skip to next attempt/model
+                logger.warning(f"[Gemini] Model '{model_name}' returned empty response")
+                break
 
-        except Exception as e:
-            print(f"❌ Setup Error ({model_name}): {e}")
-            continue
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
 
+                # 404 = model not found/deprecated → skip immediately
+                if "404" in error_str or "NOT_FOUND" in error_str:
+                    logger.warning(
+                        f"[Gemini] Model '{model_name}' returned 404/NOT_FOUND. "
+                        f"Skipping to next model."
+                    )
+                    break  # exit retry loop, try next model
+
+                # 429 = quota/rate limit → skip to next model (no point waiting)
+                if ("429" in error_str or "RESOURCE_EXHAUSTED" in error_str
+                        or "quota" in error_str.lower()):
+                    logger.warning(
+                        f"[Gemini] Model '{model_name}' quota exhausted. "
+                        f"Skipping to next model."
+                    )
+                    break  # exit retry loop, try next model
+
+                # Transient/unknown error — exponential backoff then retry
+                wait_time = delay * (2 ** attempt)
+                logger.warning(
+                    f"[Gemini] Model '{model_name}' error (attempt {attempt + 1}/{retries}): "
+                    f"{error_str[:120]}. Retrying in {wait_time}s..."
+                )
+                await asyncio.sleep(min(wait_time, 8))
+
+    logger.error(
+        f"[Gemini] All models exhausted. Last error: {last_error}"
+    )
     return f"Error: AI service is currently busy. Please try again later. (Details: {str(last_error)})"
 
 async def analyze_resume_match(resume_text: str, job_desc: str):
     prompt = f"""
-    You are an advanced AI Resume Evaluation Engine designed for internship and early-career technical roles.
-    Your job is to deeply analyze a candidate's resume against a SPECIFIC job description and calculate a highly customized, dynamic compatibility score.
+    You are an elite, highly critical AI Technical Recruiter & Resume Evaluation Engine.
+    Your objective is to deeply and strictly evaluate a candidate's resume against a SPECIFIC job description and calculate a highly accurate, dynamic compatibility score (0-100).
+    You must NOT be generous. A score of 100 means the candidate is a literal perfect match with years of experience in every required technology.
 
     TARGET JOB DESCRIPTION:
     {job_desc[:4000]}
@@ -91,30 +130,26 @@ async def analyze_resume_match(resume_text: str, job_desc: str):
 
     Follow these rules STRICTLY:
 
-    1. Dynamic Job Role Calibration: Identify the core nature of the Job Description (e.g., QA, SDE, Backend, Data Science, Product Management). Evaluate the resume strictly through the lens of THIS specific role.
-
-    2. Keyword Extraction & Semantic Matching: Extract skills from the JD and Resume. Look for semantic matches (e.g., 'Backend APIs' == 'Express.js Rest APIs'). Recognize tech stack acronyms (MERN, LAMP, etc.).
-
-    3. Dynamic Compatibility Score (0-100) using this weighting:
-    - 40% Core Skills match
-    - 30% Experience relevance
-    - 20% Tools & Technologies
-    - 10% Soft Skills
-    RULE: Never give 0 if candidate has any IT/Software background. Realistic scores: 25-45 weak, 50-75 average, 75-95 strong.
-
-    4. Missing Skills: List ONLY skills from the JD completely missing from resume.
-
-    5. Improvement Suggestions: Actionable steps the candidate can take to improve their match for this specific role.
-
+    1. Deep Semantic Matching: Look for underlying semantic matches (e.g., "NodeJS" matches "Node", "Backend APIs" matches "Express.js REST APIs", "PostgreSQL" satisfies "SQL"). Understand tech stack synonyms and acronyms.
+    2. Strict Penalization: If the JD explicitly requires a core technology (e.g., Python, React, Java) or years of experience, and the candidate's resume completely lacks it or only mentions it as a passing hobby, heavily penalize the score. 
+    3. Dynamic Compatibility Score (0-100) using this stringent weighting:
+       - 50% Core Technical Skills & Frameworks (Must have the primary stack).
+       - 30% Experience relevance (If the JD wants 3+ years and they have 0, this gets 0/30).
+       - 10% Tools & Cloud (AWS, Docker, Git).
+       - 10% Soft Skills & Domain Knowledge.
+       Realistic score distributions: 
+       - < 30: Unqualified. Missing core stack.
+       - 30-55: Weak match. Missing major requirements.
+       - 55-75: Average/Good match. Has most core skills but maybe lacks niche tools or experience.
+       - 75-90: Strong match. Fits almost perfectly.
+       - > 90: Exceptional, unicorn candidate.
+    4. Missing Skills: List ONLY the critical technical skills from the JD that are completely missing from the resume. Do NOT list soft skills here.
+    5. Improvement Suggestions: Actionable, specific steps (e.g., "Build a project using Docker and Kubernetes to satisfy the cloud requirements").
     6. Experience Alignment: Return exactly one of: "High", "Medium", "Low".
-
-    7. Strengths: List 3-5 specific strengths of this resume for the role.
-
-    8. Weaknesses: List 2-4 specific weaknesses or gaps.
-
-    9. Summary: Write a 2-3 sentence AI summary of how well this candidate fits the role.
-
-    10. Resume Completeness: Check basic structure (summary, projects, experience, skills_section, education).
+    7. Strengths: List 3-5 specific, strong points in the resume that match this exact JD.
+    8. Weaknesses: List 2-4 specific technical weaknesses or experience gaps.
+    9. Summary: Write a punchy 2-3 sentence AI summary of their exact fit.
+    10. Resume Completeness: Check basic structure.
 
     Output ONLY valid JSON in EXACTLY this structure. Do NOT use markdown or backticks:
     {{
@@ -194,6 +229,118 @@ async def analyze_resume_match(resume_text: str, job_desc: str):
     except Exception as e:
         print(f"JSON Parse Error in analyze_resume_match: {e}. Raw: {raw_text[:300]}")
         return default
+
+
+async def batch_analyze_job_matches(resume_text: str, jobs: list) -> list:
+    """
+    Score a batch of jobs against a resume using Gemini.
+    jobs is a list of dicts: [{"job_id": "...", "title": "...", "description": "...", "skills": [...]}]
+    Returns a list of dicts: [{"job_id": "...", "match_score": 0-100, "matched_skills": [...], "missing_skills": [...]}]
+    """
+    if not jobs:
+        return []
+        
+    jobs_json = json.dumps([{
+        "job_id": j["job_id"],
+        "title": j["title"],
+        "description": j.get("description", "")[:1000],  # truncated to save tokens
+        "required_skills": j.get("skills", [])
+    } for j in jobs])
+
+    prompt = f"""
+    You are an elite AI Technical Recruiter Engine.
+    Evaluate the following candidate's resume against a BATCH of Job Descriptions.
+    
+    CANDIDATE RESUME:
+    {resume_text[:4000]}
+    
+    JOBS BATCH (JSON):
+    {jobs_json}
+    
+    For EACH job in the batch, calculate a STRICT dynamic compatibility score (0-100) based on:
+    - 60% Core Skills & Tech Stack match (Does the candidate actually have the required core languages/frameworks?)
+    - 30% Experience relevance (Does their background match the seniority/domain of the job?)
+    - 10% Tools & secondary requirements.
+    
+    CRITICAL RULES:
+    1. Be rigorous. Do not give high scores easily. A score of 95+ means they perfectly match every single requirement.
+    2. Deep Semantic Matching: If the JD needs "React" and they have "Next.js", that's a match. If the JD needs "SQL" and they have "PostgreSQL", that's a match.
+    3. Severe Penalties: If a core skill (e.g., Python, C++, Java) is fundamentally missing from the resume, the score MUST drop significantly (below 50).
+    4. Extract the exact matched skills and missing skills.
+    
+    Realistic scores: 
+    - < 30: Unqualified. Missing core stack.
+    - 30-55: Weak match. Missing major requirements.
+    - 55-75: Average/Good match. Has most core skills but lacks niche tools.
+    - 75-90: Strong match. Fits almost perfectly.
+    - > 90: Exceptional candidate.
+    
+    Output ONLY a valid JSON array of objects in EXACTLY this structure, with NO markdown formatting or backticks:
+    [
+      {{
+        "job_id": "the_job_id",
+        "match_score": 0,
+        "matched_skills": ["Skill1", "Skill2"],
+        "missing_skills": ["Skill3"]
+      }}
+    ]
+    """
+
+    raw_text = await get_gemini_response(prompt)
+    
+    default_results = []
+    for j in jobs:
+        default_results.append({
+            "job_id": j["job_id"],
+            "match_score": 0,
+            "matched_skills": [],
+            "missing_skills": j.get("skills", [])
+        })
+
+    try:
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+        json_match = re.search(r'\[.*\]', clean_json, re.DOTALL)
+        if json_match:
+            clean_json = json_match.group(0)
+            
+        if clean_json.startswith("'"):
+            clean_json = clean_json.replace("'", '"')
+            
+        try:
+            results = json.loads(clean_json)
+        except json.JSONDecodeError:
+            results = ast.literal_eval(clean_json)
+            
+        if not isinstance(results, list):
+            return default_results
+            
+        # Ensure all requested jobs are in the result
+        final_results = []
+        result_map = {str(r.get("job_id")): r for r in results if isinstance(r, dict)}
+        
+        for j in jobs:
+            job_id = str(j["job_id"])
+            if job_id in result_map:
+                r = result_map[job_id]
+                final_results.append({
+                    "job_id": job_id,
+                    "match_score": int(r.get("match_score", 0)),
+                    "matched_skills": r.get("matched_skills", []),
+                    "missing_skills": r.get("missing_skills", [])
+                })
+            else:
+                final_results.append({
+                    "job_id": job_id,
+                    "match_score": 0,
+                    "matched_skills": [],
+                    "missing_skills": j.get("skills", [])
+                })
+        return final_results
+
+    except Exception as e:
+        print(f"JSON Parse Error in batch_analyze_job_matches: {e}. Raw: {raw_text[:300]}")
+        return default_results
+
 
 
 def clean_extracted_text(text: str) -> str:
@@ -354,21 +501,51 @@ def _extract_linkedin(text: str) -> str | None:
     return match.group(0).rstrip(".")
 
 
+def _name_like(candidate: str) -> str | None:
+    """Return candidate if it looks like a plausible person's name, else None."""
+    compact = re.sub(r"[^A-Za-z .'-]", "", candidate).strip()
+    words = [w for w in compact.split() if w]
+    if 2 <= len(words) <= 5 and len(compact) <= 70 and all(len(w) >= 2 for w in words):
+        return compact
+    return None
+
+
 def _extract_name_from_text(text: str) -> str | None:
+    """
+    Extract a candidate name from the first 15 lines of resume text.
+
+    FIX: modern resume headers often put name, email and phone on the same line,
+    e.g. "Shashank Singh | shashank@gmail.com | +91-9876543210".
+    Split on common separators and test each piece.
+    """
+    disqualifying_tokens = ("linkedin", "github", "http", "resume", "curriculum vitae", "page ", "contact")
     for raw_line in text.splitlines()[:15]:
         line = _clean_scalar(raw_line)
         if not line:
             continue
         lower = line.lower()
-        if any(token in lower for token in ("@", "linkedin", "github", "http", "resume", "curriculum vitae")):
-            continue
-        if re.search(r"\d", line):
-            continue
-        compact = re.sub(r"[^A-Za-z .'-]", "", line).strip()
-        words = [word for word in compact.split() if word]
-        if 2 <= len(words) <= 5 and len(compact) <= 70:
-            return compact
+
+        # Common case: a clean line with just the name, nothing else.
+        if not any(token in lower for token in disqualifying_tokens) and not re.search(r"\d", line) and "@" not in line:
+            found = _name_like(line)
+            if found:
+                return found
+
+        # Combined-header case: "Shashank Singh | shashank@example.com | +91-..."
+        # Split on common separators and email/phone patterns, and test each piece.
+        pieces = re.split(r"[|•·,;]|\s[-\u2013\u2014]\s|(?:\s{2,})|(?=\S+@)|(?:\+?\d[\d\s().-]{7,}\d)", line)
+        for piece in pieces:
+            piece = piece.strip(" -–—\t")
+            if not piece or "@" in piece or re.search(r"\d", piece):
+                continue
+            if any(token in piece.lower() for token in disqualifying_tokens):
+                continue
+            found = _name_like(piece)
+            if found:
+                return found
     return None
+
+
 
 
 def _extract_skills_from_text(text: str) -> list[str]:
@@ -524,7 +701,9 @@ def _normalise_resume_payload(data: dict, source_text: str) -> dict:
 
 def _fallback_or_error(cleaned_text: str, error_message: str, raw_snippet: str = "") -> dict:
     fallback = _fallback_resume_from_text(cleaned_text)
-    if _payload_has_content(fallback):
+    # Always return the fallback even if name is None — skills, email, phone are still useful.
+    # Only fall back to the hard error dict if the text itself is completely empty.
+    if cleaned_text.strip():
         fallback["_parse_error"] = error_message
         return fallback
     return {
@@ -537,6 +716,8 @@ async def parse_resume_json(resume_text: str):
     cleaned = clean_extracted_text(resume_text)
     if not cleaned:
         return {"error": "No readable text extracted from resume"}
+
+    logger.info("[parse_resume_json] Sending %d chars to Gemini. Preview: %s", len(cleaned), cleaned[:200])
 
     prompt = f"""
     You are a professional resume parsing assistant.
@@ -576,8 +757,9 @@ async def parse_resume_json(resume_text: str):
     Do not hallucinate.
     Only extract information explicitly present in the resume.
     """
-    
+
     raw_text = await get_gemini_response(prompt)
+    logger.info("[parse_resume_json] Gemini raw response (first 500 chars): %s", (raw_text or "")[:500])
 
     if not raw_text or raw_text.startswith("Error:"):
         message = (raw_text or "Gemini returned an empty response")[:300]
@@ -588,6 +770,9 @@ async def parse_resume_json(resume_text: str):
         data = _parse_jsonish_object(raw_text)
         normalised = _normalise_resume_payload(data, cleaned)
         if _payload_has_content(normalised):
+            field_count = sum(1 for v in normalised.values() if v)
+            logger.info("[parse_resume_json] Successfully parsed %d non-empty fields. Name=%s Skills=%d",
+                        field_count, normalised.get('name'), len(normalised.get('skills', [])))
             return normalised
         logger.warning("[parse_resume_json] Gemini JSON had no expected resume fields. Raw snippet: %s", raw_text[:300])
         return _fallback_or_error(
@@ -599,42 +784,6 @@ async def parse_resume_json(resume_text: str):
         message = f"Failed to parse Gemini resume JSON: {e}"
         logger.warning("[parse_resume_json] %s. Raw snippet: %s", message, raw_text[:300])
         return _fallback_or_error(cleaned, message, raw_text)
-
-    # ── Detect AI error strings before attempting JSON parse ─────────────────
-    if not raw_text or raw_text.startswith("Error:"):
-        print(f"[parse_resume_json] Gemini returned an error, not JSON: {raw_text[:200]}")
-        return {"error": raw_text[:200]}
-
-    # ── Strip markdown fences ─────────────────────────────────────────────────
-    clean_json = raw_text.replace("```json", "").replace("```", "").strip()
-
-    # ── Extract outermost JSON object (same guard used in analyze_resume_match) ─
-    json_match = re.search(r'\{.*\}', clean_json, re.DOTALL)
-    if json_match:
-        clean_json = json_match.group(0)
-
-    # ── Single-quote normalisation ────────────────────────────────────────────
-    if clean_json.startswith("'"):
-        clean_json = clean_json.replace("'", '"')
-
-    # ── Trailing comma cleanup ────────────────────────────────────────────────
-    clean_json = re.sub(r',\s*\}', '}', clean_json)
-    clean_json = re.sub(r',\s*\]', ']', clean_json)
-
-    try:
-        data = json.loads(clean_json)
-        return data
-    except json.JSONDecodeError:
-        try:
-            data = ast.literal_eval(clean_json)
-            return data
-        except Exception:
-            pass
-        print(f"[parse_resume_json] JSON parse failed. Raw snippet: {raw_text[:300]}")
-        return {"error": "Failed to parse resume JSON", "raw_snippet": raw_text[:200]}
-    except Exception as e:
-        print(f"[parse_resume_json] Unexpected error: {e}")
-        return {"error": str(e)}
 
 async def generate_cold_email_ai(job_desc: str, user_role: str = "Developer"):
     prompt = f"""

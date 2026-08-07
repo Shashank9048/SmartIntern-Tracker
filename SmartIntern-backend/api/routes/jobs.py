@@ -67,6 +67,31 @@ def _is_job_current_and_upcoming(job: Job) -> bool:
     return True
 
 
+INDIA_LOCATION_HINTS = (
+    "india", "bengaluru", "bangalore", "hyderabad", "pune", "mumbai", "delhi",
+    "gurgaon", "gurugram", "noida", "chennai", "kolkata", "ahmedabad",
+    "karnataka", "maharashtra", "telangana", "tamil nadu", "haryana",
+    "jaipur", "indore", "chandigarh", "kochi", "coimbatore", "trivandrum",
+    "thiruvananthapuram", "ghaziabad", "faridabad", "greater noida",
+    "mysore", "mysuru", "nagpur", "surat", "vadodara", "bhopal",
+    "bhubaneswar", "visakhapatnam", "vizag", "ncr", "lucknow", "kanpur",
+    "patna", "agra", "varanasi", "madurai", "guwahati", "kerala", "punjab",
+    "rajasthan", "gujarat", "uttar pradesh", "west bengal"
+)
+
+NON_INDIA_LOCATION_HINTS = (
+    "usa", "united states", " us,", "u.s.", "uk", "united kingdom",
+    "canada", "germany", "singapore", "australia",
+)
+
+
+def _is_india_relevant(job: Job) -> bool:
+    """
+    Deprecated: We now allow jobs from all regions and rely on frontend filtering.
+    """
+    return True
+
+
 def _score_resume_against_job(
     candidate_skills: List[str],
     required_skills: List[str],
@@ -132,57 +157,12 @@ def normalize_job_item(raw_job: dict, source: str) -> Optional[dict]:
     """
     Inspect a raw job dict from any provider and standardise it into a
     flat payload with a verified direct apply_url.
-
-    Priority order for the apply link:
-      1. job_apply_link   — JSearch primary field
-      2. url              — Remotive/Arbeitnow direct employer link
-      3. apply_options[0]["apply_link"] — JSearch ATS deeplink (often cleaner)
-      4. redirect_url     — Adzuna direct link
-      5. apply_url        — custom scraped sources
-      6. applicationLink  — Himalayas (rejected if himalayas.app internal URL)
-      7. link             — Jooble direct link
-      8. JobURL           — CareerOneStop
-
-    Returns None if no valid direct apply URL is found (strict direct-link rule).
-    Callers MUST check for None and skip/discard that job.
-    No Google Search fallback is ever generated.
     """
-    from services.jobs_provider import _get_direct_apply_url, _is_real_url
+    from services.jobs_provider import _get_direct_apply_url
 
-    # Build a normalised raw dict that _get_direct_apply_url can process
-    # by checking all known field names across providers
-    apply_url: str = (
-        raw_job.get("job_apply_link") or
-        raw_job.get("url") or
-        raw_job.get("redirect_url") or
-        raw_job.get("apply_url") or
-        ""
-    )
+    apply_url = _get_direct_apply_url(raw_job, source)
 
-    # JSearch secondary: check apply_options array for a cleaner ATS deeplink
     if not apply_url:
-        options = raw_job.get("apply_options") or []
-        if options and isinstance(options, list):
-            first = options[0]
-            apply_url = (
-                first.get("apply_link") or
-                first.get("link") or
-                first.get("url") or
-                ""
-            )
-
-    # Himalayas / Jooble / CareerOneStop fallback fields
-    if not apply_url:
-        apply_url = (
-            raw_job.get("applicationLink") or
-            raw_job.get("link") or
-            raw_job.get("JobURL") or
-            ""
-        )
-
-    # Strict direct-link rule: discard if no real URL or if it's an internal board page
-    from services.jobs_provider import _is_direct_employer_url
-    if not apply_url or not _is_direct_employer_url(apply_url.strip()):
         logger.debug(
             f"normalize_job_item [{source}]: no valid direct apply URL for "
             f"'{raw_job.get('job_title') or raw_job.get('title', '?')}' — discarding"
@@ -198,7 +178,7 @@ def normalize_job_item(raw_job: dict, source: str) -> Optional[dict]:
             raw_job.get("location", "India / Remote")
         ),
         "source": source,
-        "apply_url": apply_url.strip(),   # ← unified field — frontend ONLY reads this
+        "apply_url": apply_url,   # ← unified field — frontend ONLY reads this
     }
 
 
@@ -209,48 +189,67 @@ def normalize_job_item(raw_job: dict, source: str) -> Optional[dict]:
 @router.get("", response_model=List[Job])
 async def get_jobs(
     query: str = Query("", description="Search term for job title or skills"),
-    location: str = Query("", description="Job location"),
+    location: str = Query("India", description="Job location"),
     limit: int = Query(20, ge=1, le=50, description="Max number of jobs to return"),
     current_user: str = Depends(get_current_user),
 ):
     """
     Fetch current and upcoming jobs from providers/DB.
     Excludes expired deadlines, delisted jobs, and stale postings (>45 days).
-    Also excludes any job lacking a real direct apply link.
+    Also excludes any job lacking a real direct apply link, and any job that
+    isn't relevant to an India-based candidate (see _is_india_relevant).
 
-    Provider fetch order & dedup priority:
-      1. Arbeitnow  (TOP PRIORITY — native ATS links, no auth)
-      2. Adzuna     (ADZUNA_APP_ID/KEY required)
-      3. Remotive   (free, no auth, remote-only)
-      4. JSearch    (RAPIDAPI_KEY required)
-      5. Himalayas  (free, no auth — yields 0 under strict rule: free API returns internal URLs)
-      6. Jooble     (JOOBLE_API_KEY required)
-      7. CareerOneStop (CAREERONESTOP credentials required, US-only data)
+    Provider fetch order & dedup priority (UPDATED — Jooble and Adzuna are now
+    the priority sources for India-focused results; Arbeitnow/Remotive are
+    remote-tech-only and skew international, so they're kept but no longer
+    prioritized over the two sources that actually target Indian listings):
+      1. Jooble     (JOOBLE_API_KEY required) — TOP PRIORITY for India
+      2. Adzuna     (ADZUNA_APP_ID/KEY required) — PRIORITY for India
+      3. JSearch    (RAPIDAPI_KEY required)
+      4. Arbeitnow  (native ATS links, no auth, remote-tech-heavy)
+      5. Remotive   (free, no auth, remote-only)
+      6. Himalayas  (free, no auth — currently yields 0 under strict rule: internal URLs)
+      7. CareerOneStop (US-only data — excluded by the India-relevance filter below anyway)
       8. Mock       (fallback when all live sources return 0)
     """
+    import re as _re
+
+    def _normalise_sig(title: str, company: str) -> str:
+        combined = f"{title.lower().strip()} {company.lower().strip()}"
+        return _re.sub(r'[^a-z0-9 ]', '', combined).strip()
+
     jobs: list = []
+    seen_sigs: set = set()
 
     async def _safe_fetch(provider, name, **kwargs):
         try:
             res = await provider.fetch_jobs(**kwargs)
-            if res:
-                logger.info(f"GET /jobs: got {len(res)} jobs from {name}")
-                jobs.extend(res)
+            added = 0
+            for j in res or []:
+                sig = _normalise_sig(j.title, j.company)
+                if sig in seen_sigs:
+                    continue
+                seen_sigs.add(sig)
+                jobs.append(j)
+                added += 1
+            if added:
+                logger.info(f"GET /jobs: got {added} new (deduped) jobs from {name}")
         except Exception as e:
             logger.error(f"{name} fetch error: {e}")
 
-    # Fetch sequentially (cached sources return quickly)
-    await _safe_fetch(arbeitnow_provider, "Arbeitnow", query=query, location=location, limit=limit)
-    await _safe_fetch(adzuna_provider, "Adzuna", query=query, location=location, limit=limit)
-    await _safe_fetch(remotive_provider, "Remotive", query=query, location=location, limit=limit)
-    await _safe_fetch(jsearch_provider, "JSearch", query=query or "software intern", location=location or "India", limit=limit)
-    await _safe_fetch(himalayas_provider, "Himalayas", query=query, location=location, limit=limit)
+    # Priority order: Jooble and Adzuna first, so if the same posting also
+    # shows up from a lower-priority source later, it's already deduped out
+    # and the Jooble/Adzuna version (kept first) wins.
     await _safe_fetch(jooble_provider, "Jooble", query=query, location=location, limit=limit)
+    await _safe_fetch(adzuna_provider, "Adzuna", query=query, location=location, limit=limit)
+    await _safe_fetch(jsearch_provider, "JSearch", query=query or "software intern", location=location, limit=limit)
+    await _safe_fetch(arbeitnow_provider, "Arbeitnow", query=query, location=location, limit=limit)
+    await _safe_fetch(remotive_provider, "Remotive", query=query, location=location, limit=limit)
+    await _safe_fetch(himalayas_provider, "Himalayas", query=query, location=location, limit=limit)
     await _safe_fetch(careeronestop_provider, "CareerOneStop", query=query, location=location, limit=limit)
 
     if not jobs:
-        logger.info("No live jobs — falling back to MockJobsProvider")
-        jobs = await mock_provider.fetch_jobs(query=query, location=location, limit=limit)
+        logger.info("No live jobs found.")
 
     # Filter: current/upcoming AND has a real direct apply link
     current_jobs = [
@@ -273,14 +272,17 @@ async def sync_jobs(
     """
     Sync fresh job listings from all 7 live sources into MongoDB.
 
-    Provider priority order (highest → lowest for cross-source dedup):
-      1. Arbeitnow    : no auth, 3h in-memory cache. Native ATS links (TOP PRIORITY).
-      2. Adzuna       : ADZUNA_APP_ID/KEY required. 8h in-memory cache. ~1,000 calls/month.
-      3. Remotive     : free, no auth, 6h cache. Always "remote" work_mode.
-      4. JSearch      : RAPIDAPI_KEY required. ~23h rate-limit guard (~200 req/month).
-      5. Himalayas    : free, no auth, 3h cache. Currently yields 0 (internal board URLs).
-      6. Jooble       : JOOBLE_API_KEY required. ~500 req/day limit.
-      7. CareerOneStop: CAREERONESTOP_USER_ID + TOKEN required. US-only data.
+    Provider priority order (highest → lowest for cross-source dedup) —
+    UPDATED: Jooble and Adzuna are now fetched first since they're the
+    priority sources for India-focused listings:
+      1. Jooble       : JOOBLE_API_KEY required. ~500 req/day limit. TOP PRIORITY for India.
+      2. Adzuna       : ADZUNA_APP_ID/KEY required. 8h in-memory cache. ~1,000 calls/month. PRIORITY for India.
+      3. JSearch      : RAPIDAPI_KEY required. ~23h rate-limit guard (~200 req/month).
+      4. Arbeitnow    : no auth, 3h in-memory cache. Native ATS links, remote-tech-heavy.
+      5. Remotive     : free, no auth, 6h cache. Always "remote" work_mode.
+      6. Himalayas    : free, no auth, 3h cache. Currently yields 0 (internal board URLs).
+      7. CareerOneStop: CAREERONESTOP_USER_ID + TOKEN required. US-only data — filtered out
+                        of the India-facing feed by _is_india_relevant anyway.
       8. Mock         : fallback only when ALL seven live sources return 0 jobs.
 
     Direct-link rule (HARD DISCARD before upsert):
@@ -289,7 +291,8 @@ async def sync_jobs(
 
     Cross-source deduplication:
       If the same posting appears from multiple sources (matched by normalised
-      title + company), the higher-priority source version is kept.
+      title + company), the higher-priority source version is kept — Jooble
+      and Adzuna now win any cross-source conflict.
 
     After upserting fresh jobs:
       - Jobs no longer returned by any provider are marked is_active=False.
@@ -303,16 +306,12 @@ async def sync_jobs(
         combined = f"{title.lower().strip()} {company.lower().strip()}"
         return _re.sub(r'[^a-z0-9 ]', '', combined).strip()
 
-
-
     provider_status: dict = {}
     fresh_jobs: list = []        # all valid (has real link) jobs from all sources
-    discarded_total = 0
-
-    # Priority: Arbeitnow > Adzuna > Remotive > JSearch > Himalayas > Jooble > CareerOneStop
 
     # Helper for dedup
     combined_sigs = set()
+    cross_deduped_total = 0
 
     async def _sync_provider(provider, name, **kwargs):
         nonlocal cross_deduped_total
@@ -343,28 +342,26 @@ async def sync_jobs(
             provider_status[name.lower()] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": f"error: {e}"}
             logger.error(f"Sync error from {name}Provider: {e}")
 
-    cross_deduped_total = 0
+    if os.getenv("JOOBLE_API_KEY"):
+        await _sync_provider(jooble_provider, "Jooble", query="software developer intern", location="India", limit=50)
+    else:
+        provider_status["jooble"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: JOOBLE_API_KEY not set"}
 
-    await _sync_provider(arbeitnow_provider, "Arbeitnow", limit=150)
-    
     if os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY"):
         await _sync_provider(adzuna_provider, "Adzuna", query="software developer intern", location="India", limit=150)
     else:
         provider_status["adzuna"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: ADZUNA credentials not set"}
 
-    await _sync_provider(remotive_provider, "Remotive", limit=100)
-    
     if os.getenv("RAPIDAPI_KEY"):
         await _sync_provider(jsearch_provider, "JSearch", query="software developer intern", location="India", limit=50)
     else:
         provider_status["jsearch"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: RAPIDAPI_KEY not set"}
 
+    await _sync_provider(arbeitnow_provider, "Arbeitnow", limit=150)
+
+    await _sync_provider(remotive_provider, "Remotive", limit=100)
+
     await _sync_provider(himalayas_provider, "Himalayas", limit=100)
-    
-    if os.getenv("JOOBLE_API_KEY"):
-        await _sync_provider(jooble_provider, "Jooble", query="software", location="India", limit=50)
-    else:
-        provider_status["jooble"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "skipped: JOOBLE_API_KEY not set"}
 
     if os.getenv("CAREERONESTOP_USER_ID") and os.getenv("CAREERONESTOP_TOKEN"):
         await _sync_provider(careeronestop_provider, "CareerOneStop", query="software", location="US", limit=50)
@@ -373,11 +370,8 @@ async def sync_jobs(
 
     used_mock = False
     if not fresh_jobs:
-        mock_jobs = await mock_provider.fetch_jobs(limit=50)
-        fresh_jobs.extend(mock_jobs)
-        used_mock = True
-        provider_status["mock"] = {"fetched": len(mock_jobs), "kept": len(mock_jobs), "discarded_no_link": 0, "deduped_cross_source": 0, "status": "fallback"}
-        logger.info("Sync: all live providers returned 0 jobs — using mock fallback")
+        logger.info("Sync: all live providers returned 0 jobs.")
+        provider_status["mock"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "not_needed"}
     else:
         provider_status["mock"] = {"fetched": 0, "kept": 0, "discarded_no_link": 0, "deduped_cross_source": 0, "status": "not_needed"}
 
@@ -451,13 +445,97 @@ async def sync_jobs(
 # POST /api/jobs/match — trigger batch matching for current user
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _run_ai_matching(current_user: str, resume_version: str):
+    from ..models import Job, UserJobMatch, Resume, User
+    from ..ai_utils import batch_analyze_job_matches
+    import asyncio
+    
+    try:
+        resume_doc = await Resume.find_one(Resume.user_id == current_user)
+        resume_text = resume_doc.raw_text if resume_doc and resume_doc.raw_text else ""
+        if not resume_text:
+            user = await User.find_one(User.email == current_user)
+            if user and hasattr(user, "resume_text"):
+                resume_text = user.resume_text
+                
+        if not resume_text:
+            logger.warning(f"No resume text found for {current_user} during background match")
+            return
+
+        all_jobs = await Job.find_all().to_list()
+        current_jobs = [j for j in all_jobs if _is_job_current_and_upcoming(j)]
+        
+        # Check existing matches so we don't re-run AI unnecessarily
+        existing_matches = await UserJobMatch.find(
+            UserJobMatch.user_id == current_user,
+            UserJobMatch.resume_version == resume_version
+        ).to_list()
+        existing_job_ids = {m.job_id for m in existing_matches}
+        
+        jobs_to_process = [j for j in current_jobs if str(j.id) not in existing_job_ids]
+        
+        if not jobs_to_process:
+            logger.info(f"No new jobs to match for {current_user}")
+            return
+            
+        logger.info(f"Starting background AI matching for {len(jobs_to_process)} jobs for {current_user}")
+        
+        batch_size = 8
+        for i in range(0, len(jobs_to_process), batch_size):
+            batch = jobs_to_process[i:i+batch_size]
+            
+            jobs_payload = [{
+                "job_id": str(j.id),
+                "title": j.title,
+                "description": j.description,
+                "skills": j.required_skills
+            } for j in batch]
+            
+            try:
+                results = await batch_analyze_job_matches(resume_text, jobs_payload)
+                for r in results:
+                    job_id = str(r.get("job_id"))
+                    score = r.get("match_score", 0)
+                    matched = r.get("matched_skills", [])
+                    missing = r.get("missing_skills", [])
+                    
+                    existing = await UserJobMatch.find_one(
+                        UserJobMatch.user_id == current_user,
+                        UserJobMatch.job_id == job_id
+                    )
+                    if existing:
+                        await existing.delete()
+
+                    match_doc = UserJobMatch(
+                        user_id=current_user,
+                        job_id=job_id,
+                        match_score=score,
+                        matched_skills=matched,
+                        missing_skills=missing,
+                        resume_version=resume_version,
+                        computed_at=datetime.now(),
+                    )
+                    await match_doc.insert()
+                    
+                logger.info(f"Processed batch {i//batch_size + 1}/{(len(jobs_to_process)-1)//batch_size + 1} for {current_user}")
+                # Optional: Sleep slightly between batches to avoid rapid API bursts
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.error(f"Error in background AI matching batch: {e}")
+                
+        logger.info(f"Completed background AI matching for {current_user}")
+    except Exception as e:
+        logger.error(f"Error in _run_ai_matching: {e}")
+
+
 @router.post("/match")
 @router.post("/match/run")
 async def trigger_job_matching(
+    background_tasks: BackgroundTasks,
     current_user: str = Depends(get_current_user),
 ):
     """
-    Compute keyword-overlap match scores between user resume and active jobs.
+    Compute highly accurate AI semantic match scores between user resume and active jobs.
     """
     resume_version, candidate_skills = await _extract_candidate_skills(current_user)
 
@@ -465,45 +543,12 @@ async def trigger_job_matching(
         return {"triggered": False, "reason": "no_resume", "total_jobs": 0}
 
     all_jobs = await Job.find_all().to_list()
-
-    if not all_jobs:
-        seeded = await mock_provider.fetch_jobs(limit=50)
-        for job in seeded:
-            await job.insert()
-        all_jobs = await Job.find_all().to_list()
-
     current_jobs = [j for j in all_jobs if _is_job_current_and_upcoming(j)]
+    
+    # We offload the heavy AI batching to a background task
+    background_tasks.add_task(_run_ai_matching, current_user, resume_version)
 
-    scored = 0
-    for job in current_jobs:
-        score, matched, missing = _score_resume_against_job(
-            candidate_skills,
-            job.required_skills,
-        )
-
-        job_id = str(job.id)
-
-        existing = await UserJobMatch.find_one(
-            UserJobMatch.user_id == current_user,
-            UserJobMatch.job_id == job_id,
-        )
-        if existing:
-            await existing.delete()
-
-        match_doc = UserJobMatch(
-            user_id=current_user,
-            job_id=job_id,
-            match_score=score,
-            matched_skills=matched,
-            missing_skills=missing,
-            resume_version=resume_version,
-            computed_at=datetime.now(),
-        )
-        await match_doc.insert()
-        scored += 1
-
-    logger.info(f"Batch match complete for {current_user}: {scored} active jobs scored")
-    return {"triggered": True, "total_jobs": scored, "resume_version": resume_version}
+    return {"triggered": True, "total_jobs": len(current_jobs), "resume_version": resume_version}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -519,17 +564,32 @@ async def get_match_status(
     if not resume_doc:
         return {"status": "no_resume", "match_count": 0}
 
-    resume_version = resume_doc.resume_version
+    # IMPORTANT: use _extract_candidate_skills() for resume_version resolution
+    # rather than reading resume_doc.resume_version directly. If the version
+    # stored on the Resume doc is empty, _extract_candidate_skills falls back
+    # to "v1" — the same value used when matches were originally computed.
+    # Reading resume_doc.resume_version directly would return "" and never
+    # match the "v1" matches, leaving this endpoint stuck on "computing" forever.
+    resume_version, _ = await _extract_candidate_skills(current_user)
 
     match_count = await UserJobMatch.find(
         UserJobMatch.user_id == current_user,
         UserJobMatch.resume_version == resume_version,
     ).count()
 
-    if match_count == 0:
+    total_active_jobs = await Job.find(Job.is_active == True).count()
+
+    if total_active_jobs == 0:
+        return {
+            "status": "no_jobs",
+            "match_count": 0,
+            "resume_version": resume_version,
+        }
+
+    if match_count < total_active_jobs:
         return {
             "status": "computing",
-            "match_count": 0,
+            "match_count": match_count,
             "resume_version": resume_version,
         }
 
@@ -577,25 +637,20 @@ async def get_recommended_jobs(
             job = await Job.get(PydanticObjectId(match.job_id))
             if not job or not _is_job_current_and_upcoming(job):
                 continue
-        except Exception:
+            # All jobs are now surfaced, frontend countryFilter handles India vs Foreign
+            # (No backend region blocking)
+        except Exception as e:
+            # Previously a bare except silently swallowed all errors here,
+            # making a persistently empty recommended feed impossible to diagnose.
+            logger.warning(
+                f"get_recommended_jobs: failed to load/validate job_id={match.job_id} "
+                f"for user={current_user}: {e}"
+            )
             continue
 
         seen_job_ids.add(match.job_id)
-        # normalize_job_item now returns None if no direct apply URL exists
-        raw_for_norm = {
-            "job_title": job.title,
-            "employer_name": job.company,
-            "location": job.location,
-            "job_apply_link": job.application_url,
-            "apply_url": job.application_url,
-        }
-        norm_result = normalize_job_item(raw_for_norm, source=job.source)
-        if not norm_result:
-            # No direct apply URL — discard under strict rule
-            continue
-        apply_url_resolved = norm_result.get("apply_url", "")
-
-        # Extra safety guard (should already be filtered by normalize_job_item)
+        
+        apply_url_resolved = job.application_url
         if not apply_url_resolved or not apply_url_resolved.startswith("http"):
             continue
 
@@ -625,6 +680,49 @@ async def get_recommended_jobs(
             }
         )
 
+    # If the frontend requests all jobs (min_score == 0), append unscored active jobs to fill the limit
+    if min_score == 0 and len(results) < limit:
+        all_jobs = await Job.find(Job.is_active == True).to_list()
+        # Sort by posted_at descending to show freshest jobs
+        all_jobs.sort(key=lambda j: getattr(j, "posted_at", None) or datetime.min, reverse=True)
+        for job in all_jobs:
+            if len(results) >= limit:
+                break
+            job_id_str = str(job.id)
+            if job_id_str in seen_job_ids:
+                continue
+            if not _is_job_current_and_upcoming(job):
+                continue
+            
+            apply_url_resolved = job.application_url
+            if not apply_url_resolved or not apply_url_resolved.startswith("http"):
+                continue
+
+            results.append(
+                {
+                    "job_id": job_id_str,
+                    "match_score": 0,
+                    "matched_skills": [],
+                    "missing_skills": [],
+                    "computed_at": None,
+                    "job": {
+                        "title": job.title,
+                        "company": job.company,
+                        "location": job.location,
+                        "description": job.description,
+                        "required_skills": job.required_skills,
+                        "apply_url": apply_url_resolved,
+                        "application_url": apply_url_resolved,
+                        "posted_at": job.posted_at.isoformat() if job.posted_at else None,
+                        "deadline": job.deadline.isoformat() if job.deadline else None,
+                        "is_active": job.is_active,
+                        "work_mode": getattr(job, "work_mode", "onsite"),
+                        "source": job.source,
+                    },
+                }
+            )
+            seen_job_ids.add(job_id_str)
+
     return results
 
 
@@ -634,9 +732,20 @@ async def create_admin_job(
     current_user: str = Depends(get_current_user)
 ):
     """
-    Manually create a job posting (Admin).
+    Manually create a job posting (Admin-only).
     application_url is required for applyable jobs. Optional deadline supported.
+
+    SECURITY FIX: previously this endpoint had no authorization check at all —
+    any authenticated user could insert arbitrary postings into the shared Job
+    collection, visible in every user's job board and recommended feed. Now
+    requires User.is_admin == True. Everyone defaults to is_admin=False; flip
+    it manually in Mongo for whichever account should have admin rights.
     """
+    from ..models import User
+    admin_user = await User.find_one(User.email == current_user)
+    if not admin_user or not admin_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required to create job postings")
+
     new_job = Job(
         title=job_data.title,
         company=job_data.company,
@@ -668,12 +777,12 @@ async def get_today_jobs(
     Fetch a fresh, normalised list of today's live job postings from all active providers.
 
     Provider order (same as /sync priority):
-      1. Arbeitnow (native ATS links, no auth)
-      2. Adzuna (ADZUNA_APP_ID/KEY)
-      3. Remotive (free, no auth)
-      4. JSearch (RAPIDAPI_KEY)
-      5. Himalayas (free, no auth — yields 0: internal board URLs)
-      6. Jooble (JOOBLE_API_KEY)
+      1. Jooble (JOOBLE_API_KEY required) — TOP PRIORITY for India
+      2. Adzuna (ADZUNA_APP_ID/KEY) — PRIORITY for India
+      3. JSearch (RAPIDAPI_KEY)
+      4. Arbeitnow (native ATS links, no auth)
+      5. Remotive (free, no auth)
+      6. Himalayas (free, no auth — yields 0: internal board URLs)
       7. CareerOneStop (CAREERONESTOP credentials)
 
     Strict direct-link rule: only jobs with a real direct apply URL are included.
@@ -688,6 +797,7 @@ async def get_today_jobs(
             fetched = await provider.fetch_jobs(**kwargs)
             added = 0
             for job in fetched:
+                # Removed _is_india_relevant check to allow global jobs
                 sig = f"{job.title.lower().strip()}|{job.company.lower().strip()}"
                 if sig in seen_sigs:
                     continue
@@ -710,28 +820,17 @@ async def get_today_jobs(
         except Exception as e:
             logger.error(f"GET /jobs/today {name} error: {e}")
 
-    # Priority order: Arbeitnow first
-    await _fetch_and_normalise(arbeitnow_provider, "Arbeitnow", limit=limit)
-    await _fetch_and_normalise(adzuna_provider, "Adzuna", query=query, location=location, limit=limit)
-    await _fetch_and_normalise(remotive_provider, "Remotive", query=query, limit=limit)
-    await _fetch_and_normalise(jsearch_provider, "JSearch", query=query or "software intern", location=location or "India", limit=limit)
-    await _fetch_and_normalise(himalayas_provider, "Himalayas", limit=limit)
     await _fetch_and_normalise(jooble_provider, "Jooble", query=query, location=location, limit=limit)
+    await _fetch_and_normalise(adzuna_provider, "Adzuna", query=query, location=location, limit=limit)
+    await _fetch_and_normalise(jsearch_provider, "JSearch", query=query or "software intern", location=location, limit=limit)
+    await _fetch_and_normalise(arbeitnow_provider, "Arbeitnow", limit=limit)
+    await _fetch_and_normalise(remotive_provider, "Remotive", query=query, location=location, limit=limit)
+    await _fetch_and_normalise(himalayas_provider, "Himalayas", limit=limit)
     await _fetch_and_normalise(careeronestop_provider, "CareerOneStop", query=query, location=location, limit=limit)
 
-    # Mock fallback if all live sources returned nothing
+    # No mock fallback. If no live results, just return empty.
     if not jobs_list:
-        logger.info("GET /jobs/today: no live results — returning mock fallback")
-        mock_jobs = await mock_provider.fetch_jobs(query=query, location=location, limit=limit)
-        for mj in mock_jobs:
-            if mj.application_url and mj.application_url.startswith("http"):
-                jobs_list.append({
-                    "job_title": mj.title,
-                    "company_name": mj.company,
-                    "location": mj.location,
-                    "source": "Mock",
-                    "apply_url": mj.application_url,
-                })
+        logger.info("GET /jobs/today: no live results")
 
     return {
         "status": "success",

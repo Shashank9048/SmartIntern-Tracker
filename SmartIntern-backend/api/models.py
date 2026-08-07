@@ -26,10 +26,12 @@ class Job(Document):
     posted_at: Optional[datetime] = None
     deadline: Optional[datetime] = None
     is_active: bool = True
+    work_mode: str = "onsite"   # remote | onsite | hybrid
     created_at: datetime = Field(default_factory=datetime.now)
 
     class Settings:
         name = "jobs"
+
 
 class UserJobMatch(Document):
     user_id: str
@@ -110,6 +112,9 @@ class User(Document):
     preferences: dict = {"theme": "system", "notifications": {"email": True, "interview": True, "marketing": False}}
     dashboard_insights: Optional[DashboardInsightCache] = None
     created_at: datetime = datetime.now()
+    # SECURITY: Admin flag. Defaults to False for all users.
+    # Flip manually in Mongo for admin accounts — no sign-up path grants this.
+    is_admin: bool = False
 
     class Settings:
         name = "users"

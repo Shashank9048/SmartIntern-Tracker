@@ -20,11 +20,11 @@ else:
     logger.info("RESEND_API_KEY not set — digest/reminder emails will use Gmail SMTP fallback.")
 
 # Warn at module load if neither email channel is configured
-_gmail_user = os.getenv("GMAIL_USER")
-_gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
-if not _resend_available and not (_gmail_user and _gmail_pass):
+_smtp_sender = os.getenv("SMTP_SENDER") or os.getenv("GMAIL_USER")
+_smtp_pass = os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD")
+if not _resend_available and not (_smtp_sender and _smtp_pass):
     logger.warning(
-        "[scheduler] Neither RESEND_API_KEY nor GMAIL_USER+GMAIL_APP_PASSWORD are set. "
+        "[scheduler] Neither RESEND_API_KEY nor SMTP_SENDER+SMTP_PASSWORD are set. "
         "Emails will be logged as [MOCK EMAIL] only and never actually sent."
     )
 
@@ -48,26 +48,33 @@ def _send_notification_email(to_email: str, subject: str, html_body: str) -> boo
         except Exception as e:
             logger.error(f"Resend send failed ({to_email}): {e}")
 
-    # Gmail SMTP fallback
-    gmail_user = os.getenv("GMAIL_USER")
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
-    if gmail_user and gmail_pass:
+    # SMTP fallback
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_sender = os.getenv("SMTP_SENDER") or os.getenv("GMAIL_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD")
+    
+    if smtp_sender and smtp_password:
         try:
             import smtplib
             from email.mime.multipart import MIMEMultipart
             from email.mime.text import MIMEText
             msg = MIMEMultipart("alternative")
-            msg["From"] = gmail_user
+            msg["From"] = smtp_sender
             msg["To"] = to_email
             msg["Subject"] = subject
             msg.attach(MIMEText(html_body, "html"))
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-                smtp.login(gmail_user, gmail_pass)
+            
+            with smtplib.SMTP(smtp_server, smtp_port) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.login(smtp_sender, smtp_password)
                 smtp.send_message(msg)
-            logger.info(f"Gmail SMTP sent to {to_email}: {subject}")
+                
+            logger.info(f"SMTP sent to {to_email}: {subject}")
             return True
         except Exception as e:
-            logger.error(f"Gmail SMTP send failed ({to_email}): {e}")
+            logger.error(f"SMTP send failed ({to_email}): {e}")
 
     # Both failed — log mock
     logger.info(f"[MOCK EMAIL] Would send '{subject}' to {to_email}")
@@ -131,7 +138,7 @@ class NotificationScheduler:
         """
         from api.models import Application, Notification
         logger.info("[scheduler] run_deadline_reminders starting...")
-        now = datetime.now()
+        now = datetime.utcnow()
         upcoming_window = now + timedelta(hours=48)
 
         apps = await Application.find({
@@ -191,6 +198,83 @@ class NotificationScheduler:
         html = f"<h2>Reminder</h2><p>{message}</p>"
         sent = _send_notification_email(app.user_id, f"Reminder: {company} {role}", html)
         logger.info(f"Reminder sent={sent} to {app.user_id}: {message[:80]}")
+
+    async def run_due_automations(self):
+        """
+        Runs regularly to sweep ALL active automations (followup, interview, status)
+        whose scheduled_at <= now, send emails/in-app notifications, and mark them completed.
+        """
+        from api.models import Automation, Application, Notification, User
+        from beanie import PydanticObjectId
+
+        logger.info("[scheduler] run_due_automations starting...")
+        now = datetime.utcnow()
+        due = await Automation.find(
+            Automation.status == "active",
+            Automation.scheduled_at <= now
+        ).to_list()
+
+        logger.info("[scheduler] Found %d active due automations to process", len(due))
+        for auto in due:
+            try:
+                company = "Company"
+                role = "Position"
+                if auto.application_id:
+                    try:
+                        app_doc = await Application.get(PydanticObjectId(auto.application_id))
+                        if app_doc:
+                            company = app_doc.company_name
+                            role = app_doc.role
+                    except Exception:
+                        pass
+
+                # Send email if enabled
+                sent = False
+                if auto.email_enabled:
+                    if auto.type == "interview":
+                        subject = f"Interview Reminder: {company} - {role}"
+                        body = f"<h2>Interview Reminder</h2><p>This is a reminder for your upcoming interview for <strong>{role}</strong> at <strong>{company}</strong>.</p>"
+                    elif auto.type == "status":
+                        subject = f"Status Update Reminder: {company} - {role}"
+                        body = f"<h2>Status Check Reminder</h2><p>This is a reminder to check for a status update on your application for <strong>{role}</strong> at <strong>{company}</strong>.</p>"
+                    else:
+                        subject = f"Follow-up Reminder: {company} - {role}"
+                        body = f"<h2>Follow-up Reminder</h2><p>This is a reminder to follow up on your application for <strong>{role}</strong> at <strong>{company}</strong>.</p>"
+                        
+                    sent = _send_notification_email(auto.user_id, subject, body)
+
+                # Always insert in-app notification
+                try:
+                    if auto.type == "interview":
+                        msg = f"Interview reminder for {company} - {role}"
+                        notif_type = "interview"
+                    elif auto.type == "status":
+                        msg = f"Check status for {company} - {role}"
+                        notif_type = "deadline"
+                    else:
+                        msg = f"Follow-up reminder for {company} - {role}"
+                        notif_type = "deadline"
+
+                    notif = Notification(
+                        user_id=auto.user_id,
+                        type=notif_type,
+                        payload={
+                            "message": msg,
+                            "application_id": auto.application_id,
+                            "company": company,
+                            "role": role
+                        }
+                    )
+                    await notif.insert()
+                except Exception as ne:
+                    logger.error(f"[scheduler] Notification insert error: {ne}")
+
+                # Transition status to completed (or failed) so it clears from active/overdue!
+                auto.status = "completed" if (sent or not auto.email_enabled) else "failed"
+                await auto.save()
+                logger.info("[scheduler] Processed automation %s for user %s: status=%s", auto.id, auto.user_id, auto.status)
+            except Exception as e:
+                logger.error("[scheduler] Error processing automation %s: %s", auto.id, e)
 
     async def run_jobs_sync(self):
         """
@@ -310,6 +394,8 @@ class NotificationScheduler:
         self.scheduler.add_job(self.run_weekly_digest, "cron", day_of_week="mon", hour=9)
         # Deadline/interview reminders: every day at 8AM
         self.scheduler.add_job(self.run_deadline_reminders, "cron", hour=8)
+        # Overdue automation sweeper (all types): every 60 seconds
+        self.scheduler.add_job(self.run_due_automations, "interval", seconds=60)
         # Scheduled job ingestion: every 3 hours
         # Interval matches the shortest provider TTL (Arbeitnow=3h, Himalayas=3h).
         # Remotive (6h) and Adzuna (8h) have longer TTLs and return cached results on

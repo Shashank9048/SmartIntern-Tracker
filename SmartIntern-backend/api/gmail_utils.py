@@ -8,8 +8,8 @@ import os
 from datetime import datetime
 import re
 
-GMAIL_USER = os.environ.get("GMAIL_USER")
-GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
+GMAIL_USER = os.environ.get("SMTP_SENDER") or os.environ.get("GMAIL_USER")
+GMAIL_PASS = os.environ.get("SMTP_PASSWORD") or os.environ.get("GMAIL_APP_PASSWORD")
 
 def send_email_smtp(to_email: str, subject: str, body: str):
     if not GMAIL_USER or not GMAIL_PASS:

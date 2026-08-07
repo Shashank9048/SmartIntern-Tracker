@@ -104,7 +104,48 @@ function NoResumeState() {
   )
 }
 
-function EmptyMatchesState() {
+function NotParsedState() {
+  return (
+    <div className="border border-dashed border-white/20 rounded-2xl py-16 px-8 flex flex-col items-center justify-center gap-4 bg-white/[0.02]">
+      <div
+        className="text-lg text-muted-foreground font-mono select-none"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        {'> resume missing skills'}
+      </div>
+      <p className="text-sm text-muted-foreground text-center max-w-xs">
+        We couldn't extract skills from your resume. Please check or re-upload a different format.
+      </p>
+      <Link href="/resume">
+        <Button
+          size="sm"
+          className="bg-primary/20 text-primary hover:bg-primary/30 border border-primary/30 gap-1.5"
+        >
+          <ChevronRight className="w-3.5 h-3.5" />
+          Go to Resume page
+        </Button>
+      </Link>
+    </div>
+  )
+}
+
+function NoJobsState() {
+  return (
+    <div className="border border-dashed border-white/20 rounded-2xl py-16 px-8 flex flex-col items-center justify-center gap-4 bg-white/[0.02]">
+      <div
+        className="text-lg text-muted-foreground font-mono select-none"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        {'> no live listings synced yet'}
+      </div>
+      <p className="text-sm text-muted-foreground text-center max-w-xs">
+        There are currently zero active job listings synced in the database.
+      </p>
+    </div>
+  )
+}
+
+function EmptyMatchesState({ onShowAll }: { onShowAll?: () => void }) {
   const [blink, setBlink] = useState(true)
 
   useEffect(() => {
@@ -127,16 +168,27 @@ function EmptyMatchesState() {
       <p className="text-sm text-muted-foreground text-center max-w-xs">
         Try lowering the score filter, or update your resume with more skills.
       </p>
-      <Link href="/resume">
-        <Button
-          size="sm"
-          variant="outline"
-          className="border-white/10 gap-1.5 hover:bg-white/5"
-        >
-          <ChevronRight className="w-3.5 h-3.5" />
-          Update Resume
-        </Button>
-      </Link>
+      <div className="flex gap-3 mt-2">
+        <Link href="/resume">
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-white/10 gap-1.5 hover:bg-white/5"
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+            Update Resume
+          </Button>
+        </Link>
+        {onShowAll && (
+          <Button
+            size="sm"
+            className="bg-primary/20 text-primary hover:bg-primary/30 border border-primary/30 gap-1.5"
+            onClick={onShowAll}
+          >
+            Show All Live Drives
+          </Button>
+        )}
+      </div>
     </div>
   )
 }
@@ -151,10 +203,14 @@ export default function ApplicationsPage() {
   const { user } = useAuth()
   const {
     applications,
+    trackedJobs,
     loading,
     addApplication,
     updateApplication,
     deleteApplication,
+    addTrackedJob,
+    updateTrackedJobStatus,
+    deleteTrackedJob,
     refetch,
   } = useApplicationContext()
 
@@ -175,34 +231,24 @@ export default function ApplicationsPage() {
   const [feedLoading, setFeedLoading] = useState(true)
   const [triggerFired, setTriggerFired] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  // Client-side score filter (0 = show all)
   const [minScoreFilter, setMinScoreFilter] = useState(0)
+  // Client-side work mode filter ('all' | 'remote' | 'onsite')
+  const [workModeFilter, setWorkModeFilter] = useState<'all' | 'remote' | 'onsite'>('all')
+  // Client-side country filter ('all' | 'indian' | 'foreign')
+  const [countryFilter, setCountryFilter] = useState<'all' | 'indian' | 'foreign'>('all')
   // Track which job_ids have been actioned (applied/saved)
   const [trackedJobIds, setTrackedJobIds] = useState<Set<string>>(new Set())
 
-  // ── Job Tracker (feed-sourced kanban) state ────────────────────────────
-  const [trackedJobs, setTrackedJobs] = useState<TrackedJobEntry[]>([])
-  const [trackerLoading, setTrackerLoading] = useState(false)
-  const trackerFetchedRef = useRef(false)
-
-  const fetchTrackedJobs = useCallback(async () => {
-    setTrackerLoading(true)
-    try {
-      const data = await APIClient.get<TrackedJobEntry[]>('/api/tracked-jobs')
-      setTrackedJobs(data)
-      // Pre-populate the actioned set so JobCards in the feed show 'Tracked'
-      setTrackedJobIds(new Set(data.map((t) => t.job_id)))
-    } catch {
-      // Silently fail
-    } finally {
-      setTrackerLoading(false)
+  // Keep trackedJobIds in sync with context trackedJobs
+  useEffect(() => {
+    if (trackedJobs) {
+      setTrackedJobIds(new Set(trackedJobs.map(t => t.job_id)))
     }
-  }, [])
+  }, [trackedJobs])
 
   const handleKanbanStatusChange = async (id: string, newStatus: TrackedJobStatus) => {
     try {
-      const updated = await APIClient.patch<TrackedJobEntry>(`/api/tracked-jobs/${id}`, { status: newStatus })
-      setTrackedJobs((prev) => prev.map((t) => (t._id === id ? updated : t)))
+      await updateTrackedJobStatus(id, newStatus)
       const colLabels: Record<TrackedJobStatus, string> = {
         wishlist: 'Wishlist', applied: 'Applied', oa: 'OA',
         interview: 'Interview', offer: 'Offer', rejected: 'Rejected'
@@ -216,8 +262,7 @@ export default function ApplicationsPage() {
 
   const handleKanbanDelete = async (id: string) => {
     try {
-      await APIClient.delete(`/api/tracked-jobs/${id}`)
-      setTrackedJobs((prev) => prev.filter((t) => t._id !== id))
+      await deleteTrackedJob(id)
       toast.success('✓ Removed from tracker', { duration: 2000 })
     } catch (e: any) {
       toast.error(e?.message || 'Failed to remove')
@@ -230,9 +275,39 @@ export default function ApplicationsPage() {
     try {
       // No min_score param — backend defaults to 0 (all jobs), we filter client-side
       const data = await APIClient.get<RecommendedJobEntry[]>('/api/jobs/recommended')
-      setRecommendedJobs(data)
-    } catch {
-      // Silently fail — keep showing existing data
+      if (data && data.length > 0) {
+        setRecommendedJobs(data)
+        return
+      }
+
+      console.warn("[Applications] 0 recommended jobs found. Falling back to live feed...")
+      setMinScoreFilter(0) // Ensure fallback jobs (score 0) aren't hidden by existing filter
+      const liveRes = await APIClient.get<any[]>('/api/jobs')
+      const mapped: RecommendedJobEntry[] = (liveRes || []).map((job: any) => ({
+        job_id: job.id || job._id || crypto.randomUUID(),
+        match_score: 0,
+        matched_skills: [],
+        missing_skills: [],
+        job: job
+      }))
+      setRecommendedJobs(mapped)
+
+    } catch (err) {
+      console.error("[Applications] AI polling/recommendation failed. Using live fallback:", err)
+      try {
+        setMinScoreFilter(0)
+        const liveRes = await APIClient.get<any[]>('/api/jobs')
+        const mapped: RecommendedJobEntry[] = (liveRes || []).map((job: any) => ({
+          job_id: job.id || job._id || crypto.randomUUID(),
+          match_score: 0,
+          matched_skills: [],
+          missing_skills: [],
+          job: job
+        }))
+        setRecommendedJobs(mapped)
+      } catch (fallbackErr) {
+        toast.error("Unable to connect to job service. Ensure FastAPI is running.")
+      }
     }
   }, [])
 
@@ -272,12 +347,23 @@ export default function ApplicationsPage() {
         return
       }
 
-      if (res.status === 'no_resume') {
+      if (res.status === 'no_resume' || res.status === 'not_parsed') {
         if (pollRef.current) {
           clearInterval(pollRef.current)
           pollRef.current = null
         }
         setFeedLoading(false)
+        return
+      }
+
+      if (res.status === 'no_jobs') {
+        if (pollRef.current) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+        }
+        await fetchRecommended() // This will trigger the fallback since /api/jobs/recommended will return 0
+        setFeedLoading(false)
+        return
       }
     } catch {
       setFeedLoading(false)
@@ -292,14 +378,6 @@ export default function ApplicationsPage() {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [checkStatus])
-
-  // Fetch tracked jobs when My Applications tab is first opened
-  useEffect(() => {
-    if (activeTab === 'applications' && !trackerFetchedRef.current) {
-      trackerFetchedRef.current = true
-      fetchTrackedJobs()
-    }
-  }, [activeTab, fetchTrackedJobs])
 
   // Auto-score pending application cards once user + apps load
   useEffect(() => {
@@ -458,28 +536,56 @@ export default function ApplicationsPage() {
                 </h2>
                 <p className="text-sm text-muted-foreground mt-0.5">
                   {matchStatus === 'ready' && recommendedJobs.length > 0
-                    ? `${recommendedJobs.filter(j => j.match_score >= minScoreFilter).length} match${recommendedJobs.filter(j => j.match_score >= minScoreFilter).length !== 1 ? 'es' : ''} shown · filter by score below`
-                    : 'Jobs scored against your resume · all scores shown'}
+                    ? `${recommendedJobs.length} match${recommendedJobs.length !== 1 ? 'es' : ''} shown`
+                    : 'Jobs matched against your resume'}
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {/* Score filter dropdown */}
+                {/* Work-mode filter buttons */}
                 {matchStatus === 'ready' && recommendedJobs.length > 0 && (
-                  <Select
-                    value={String(minScoreFilter)}
-                    onValueChange={(v) => setMinScoreFilter(Number(v))}
-                  >
-                    <SelectTrigger className="w-36 glass border-white/10 rounded-lg text-xs h-8">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-card border-white/10">
-                      <SelectItem value="0">All scores</SelectItem>
-                      <SelectItem value="50">50%+ match</SelectItem>
-                      <SelectItem value="70">70%+ match</SelectItem>
-                      <SelectItem value="85">85%+ match</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <div className="flex items-center gap-1 p-1 glass rounded-lg border border-white/10">
+                    {(['all', 'remote', 'onsite'] as const).map(mode => (
+                      <button
+                        key={mode}
+                        onClick={() => setWorkModeFilter(mode)}
+                        className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                          workModeFilter === mode
+                            ? mode === 'remote'
+                              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-400/20'
+                              : mode === 'onsite'
+                              ? 'bg-blue-500/20 text-blue-400 border border-blue-400/20'
+                              : 'bg-white/10 text-white border border-white/20'
+                            : 'text-muted-foreground hover:text-white hover:bg-white/5'
+                        }`}
+                      >
+                        {mode === 'all' ? 'All' : mode === 'remote' ? '🌐 Remote' : '🏢 On-site'}
+                      </button>
+                    ))}
+                  </div>
                 )}
+                {/* Country filter buttons */}
+                {matchStatus === 'ready' && recommendedJobs.length > 0 && (
+                  <div className="flex items-center gap-1 p-1 glass rounded-lg border border-white/10">
+                    {(['all', 'indian', 'foreign'] as const).map(country => (
+                      <button
+                        key={country}
+                        onClick={() => setCountryFilter(country)}
+                        className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                          countryFilter === country
+                            ? country === 'indian'
+                              ? 'bg-orange-500/20 text-orange-400 border border-orange-400/20'
+                              : country === 'foreign'
+                              ? 'bg-purple-500/20 text-purple-400 border border-purple-400/20'
+                              : 'bg-white/10 text-white border border-white/20'
+                            : 'text-muted-foreground hover:text-white hover:bg-white/5'
+                        }`}
+                      >
+                        {country === 'all' ? 'Any Region' : country === 'indian' ? '🇮🇳 Indian' : '🌍 Foreign'}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 {/* Refresh button */}
                 {matchStatus === 'ready' && recommendedJobs.length > 0 && (
                   <Button
@@ -506,8 +612,12 @@ export default function ApplicationsPage() {
               <ComputingState />
             ) : matchStatus === 'no_resume' ? (
               <NoResumeState />
+            ) : matchStatus === 'not_parsed' ? (
+              <NotParsedState />
+            ) : matchStatus === 'no_jobs' ? (
+              <NoJobsState />
             ) : recommendedJobs.filter(j => j.match_score >= minScoreFilter).length === 0 ? (
-              <EmptyMatchesState />
+              <EmptyMatchesState onShowAll={() => setMinScoreFilter(0)} />
             ) : (
               /* Populated: horizontal scroll strip */
               <div className="relative">
@@ -518,16 +628,21 @@ export default function ApplicationsPage() {
                   style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
                 >
                   {Array.from(new Map(recommendedJobs.map(j => [j.job_id, j])).values())
-                    .filter(j => j.match_score >= minScoreFilter)
+                    .filter(j => workModeFilter === 'all' || j.job.work_mode === workModeFilter)
+                    .filter(j => {
+                      if (countryFilter === 'all') return true;
+                      const loc = (j.job.location || '').toLowerCase();
+                      const isIndian = loc.includes('india') || loc.includes('bengaluru') || loc.includes('bangalore') || loc.includes('mumbai') || loc.includes('delhi') || loc.includes('pune') || loc.includes('hyderabad') || loc.includes('chennai') || loc.includes('gurugram') || loc.includes('noida') || loc.includes('jaipur');
+                      return countryFilter === 'indian' ? isIndian : !isIndian;
+                    })
                     .map((entry, idx) => (
                       <JobCard
                         key={`${entry.job_id}-${idx}`}
                         entry={entry}
                         isTracked={trackedJobIds.has(entry.job_id)}
-                        onApply={async (jobId) => {
+                        onApply={async (jobId, matchScore, jobData) => {
                           try {
-                            await APIClient.post('/api/tracked-jobs', { job_id: jobId, status: 'applied' })
-                            setTrackedJobIds(prev => new Set([...prev, jobId]))
+                            await addTrackedJob(jobId, 'applied', matchScore, jobData)
                             toast.success('✓ Tracked as Applied', { duration: 2500 })
                           } catch (e: any) {
                             console.error('[ApplicationsPage] Failed to track application:', e)
@@ -535,10 +650,9 @@ export default function ApplicationsPage() {
                             throw e
                           }
                         }}
-                        onSave={async (jobId) => {
+                        onSave={async (jobId, matchScore, jobData) => {
                           try {
-                            await APIClient.post('/api/tracked-jobs', { job_id: jobId, status: 'wishlist' })
-                            setTrackedJobIds(prev => new Set([...prev, jobId]))
+                            await addTrackedJob(jobId, 'wishlist', matchScore, jobData)
                             toast.success('✓ Saved to Wishlist', { duration: 2500 })
                           } catch (e: any) {
                             toast.error(e?.message || 'Failed to save job')
@@ -548,7 +662,15 @@ export default function ApplicationsPage() {
                     ))}
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {recommendedJobs.filter(j => j.match_score >= minScoreFilter).length} match{recommendedJobs.filter(j => j.match_score >= minScoreFilter).length !== 1 ? 'es' : ''} · scroll to see more →
+                  {recommendedJobs
+                    .filter(j => workModeFilter === 'all' || j.job.work_mode === workModeFilter)
+                    .filter(j => {
+                      if (countryFilter === 'all') return true;
+                      const loc = (j.job.location || '').toLowerCase();
+                      const isIndian = loc.includes('india') || loc.includes('bengaluru') || loc.includes('bangalore') || loc.includes('mumbai') || loc.includes('delhi') || loc.includes('pune') || loc.includes('hyderabad') || loc.includes('chennai') || loc.includes('gurugram') || loc.includes('noida') || loc.includes('jaipur');
+                      return countryFilter === 'indian' ? isIndian : !isIndian;
+                    })
+                    .length} match(es) · scroll to see more →
                 </p>
               </div>
             )}
@@ -744,16 +866,16 @@ export default function ApplicationsPage() {
                   </p>
                 </div>
                 <button
-                  onClick={fetchTrackedJobs}
+                  onClick={refetch}
                   className="text-xs text-muted-foreground hover:text-white flex items-center gap-1 transition-colors"
-                  disabled={trackerLoading}
+                  disabled={loading}
                 >
-                  <RefreshCw className={`w-3 h-3 ${trackerLoading ? 'animate-spin' : ''}`} />
-                  {trackerLoading ? 'Loading…' : 'Refresh'}
+                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                  {loading ? 'Loading…' : 'Refresh'}
                 </button>
               </div>
 
-              {trackerLoading ? (
+              {loading ? (
                 <div className="flex gap-3 overflow-x-auto pb-4">
                   {[1,2,3,4,5,6].map((n) => (
                     <div key={n} className="min-w-[230px] h-[120px] glass rounded-xl animate-pulse" />

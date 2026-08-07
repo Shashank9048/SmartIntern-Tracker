@@ -18,7 +18,7 @@ interface AutomationStats {
   total_active: number
   upcoming_reminders: number
   interviews_this_week: number
-  followups_due: number
+  overdue_count: number
 }
 
 interface AutomationItem {
@@ -57,7 +57,7 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
 
 function StatusBadge({ status, scheduledAt }: { status: string; scheduledAt: string }) {
   const now = new Date()
-  const scheduled = new Date(scheduledAt)
+  const scheduled = new Date(scheduledAt.endsWith('Z') ? scheduledAt : scheduledAt + 'Z')
 
   if (status === 'completed') {
     return (
@@ -322,8 +322,8 @@ export default function AutomationPage() {
       bg: 'bg-emerald-950/40 border-emerald-900/40',
     },
     {
-      label: 'Follow-ups Due',
-      value: stats?.followups_due ?? '—',
+      label: 'Overdue Tasks',
+      value: stats?.overdue_count ?? '—',
       icon: <AlertTriangle className="w-5 h-5" />,
       color: 'text-amber-400',
       bg: 'bg-amber-950/40 border-amber-900/40',
@@ -566,7 +566,7 @@ export default function AutomationPage() {
                           <div className="flex items-center gap-3 mt-2 flex-wrap">
                             <span className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Clock className="w-3 h-3" />
-                              {new Date(item.scheduled_at).toLocaleString('en-IN', {
+                              {new Date(item.scheduled_at.endsWith('Z') ? item.scheduled_at : item.scheduled_at + 'Z').toLocaleString('en-IN', {
                                 month: 'short', day: 'numeric', year: 'numeric',
                                 hour: '2-digit', minute: '2-digit',
                               })}

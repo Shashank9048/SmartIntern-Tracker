@@ -1,4 +1,8 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'http://localhost:8000'
+).replace(/\/$/, '') // strip trailing slash to prevent double-slash URLs
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | boolean>
@@ -53,6 +57,14 @@ export class APIClient {
       })
 
       if (!response.ok) {
+        if (response.status === 401) {
+          this.setToken(null)
+          if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+            window.location.href = '/login?reason=session_expired'
+          }
+          throw new Error('Your session has expired. Please log in again.')
+        }
+
         try {
           const error = await response.json()
 
@@ -75,6 +87,13 @@ export class APIClient {
 
       return await response.json()
     } catch (error) {
+      // Convert raw TypeError: "Failed to fetch" (network unreachable) into a
+      // recognisable NetworkError so callers can silently handle it.
+      if (error instanceof TypeError && error.message === 'Failed to fetch') {
+        const networkErr = new Error(`NetworkError: Cannot reach ${this.baseURL}. Is the backend running?`)
+        networkErr.name = 'NetworkError'
+        throw networkErr
+      }
       if (error instanceof Error) {
         throw error
       }

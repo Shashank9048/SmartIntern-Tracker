@@ -410,6 +410,33 @@ export function ResumeProfileCard({ refetchSignal }: ResumeProfileProps) {
           </div>
         )}
 
+        {profile.status === 'failed' && (
+          <div className="mt-4 p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-200 flex items-center gap-3">
+            <Zap className="w-5 h-5 text-rose-400 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-rose-200">Resume parsing failed</p>
+              <p className="text-xs text-rose-300/70 mt-0.5">
+                {profile.parse_error
+                  ? `AI error: ${profile.parse_error}`
+                  : 'AI extraction could not process this file. Check the Raw Text tab — if content is visible, try re-uploading.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {profile.status === 'parsed' && profile.parse_error && (
+          <div className="mt-4 p-4 rounded-xl border border-yellow-500/30 bg-yellow-500/10 text-yellow-200 flex items-center gap-3">
+            <Zap className="w-5 h-5 text-yellow-400 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-yellow-200">AI extraction partially succeeded</p>
+              <p className="text-xs text-yellow-300/70 mt-0.5">
+                Some fields (skills, email) were extracted via text fallback. Full AI parsing encountered an issue.
+                Raw Text tab shows the original content.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="flex gap-1 mt-5 p-1 bg-black/30 rounded-lg w-fit">
           {(['parsed', 'raw'] as const).map(tab => (
@@ -448,11 +475,24 @@ export function ResumeProfileCard({ refetchSignal }: ResumeProfileProps) {
             <div className="glass rounded-xl p-6 glow text-center animate-in fade-in">
               <Zap className="w-8 h-8 text-yellow-400/60 mx-auto mb-3" />
               <p className="text-sm text-muted-foreground">
-                No structured data was extracted — this may happen with scanned or image-based PDFs.
+                No structured data was extracted.
               </p>
               <p className="text-xs text-muted-foreground/60 mt-1">
-                You can still use the raw text for AI analysis. Try re-uploading a text-based PDF.
+                This is usually caused by an AI API issue — not a scanned PDF. Check the Raw Text tab below; if text is visible, try re-uploading or refreshing.
               </p>
+            </div>
+          )}
+
+          {hasParsed && !p.name && (
+            <div className="glass rounded-xl p-4 border border-yellow-500/30 bg-yellow-500/10 animate-in fade-in flex items-start gap-3 mb-2">
+              <Zap className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-yellow-200">Name could not be extracted</p>
+                <p className="text-xs text-yellow-300/70 mt-0.5">
+                  AI parsing may have partially succeeded — skills and contact info may still be shown below.
+                  Check the Raw Text tab for full content.
+                </p>
+              </div>
             </div>
           )}
 

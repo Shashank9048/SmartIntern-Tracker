@@ -9,8 +9,8 @@ import { toast } from 'sonner'
 interface JobCardProps {
   entry: RecommendedJobEntry
   /** Called after a successful Save (wishlist) or Apply action */
-  onApply?: (jobId: string) => void
-  onSave?: (jobId: string) => void
+  onApply?: (jobId: string, matchScore?: number, jobData?: any) => void
+  onSave?: (jobId: string, matchScore?: number, jobData?: any) => void
   /** True when this job is already tracked in the kanban */
   isTracked?: boolean
 }
@@ -164,7 +164,7 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
     // 2. Fire tracking call in parallel (non-blocking)
     if (onApply) {
       setActioning('apply')
-      Promise.resolve(onApply(job_id))
+      Promise.resolve(onApply(job_id, match_score, job))
         .catch((err) => {
           console.error('[JobCard] Background application tracking failed:', err)
           toast.error('Application opened, but failed to save tracking record.')
@@ -179,7 +179,7 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
     if (actioning || tracked) return
     setActioning('save')
     try {
-      onSave?.(job_id)
+      onSave?.(job_id, match_score, job)
       setTracked(true)
       setTrackedAs('wishlist')
     } finally {
@@ -207,7 +207,7 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
 
       {/* Top row: title + score */}
       <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0 pr-12">
+        <div className="flex-1 min-w-0">
           <h3
             className="text-base font-semibold leading-snug truncate text-white group-hover:text-amber-50 transition-colors"
             style={{ fontFamily: "'Space Grotesk', sans-serif" }}
@@ -218,21 +218,7 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
             <Building2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             <span className="text-sm text-muted-foreground truncate">{job.company}</span>
           </div>
-          {job.source === 'remotive' && (job.apply_url || job.application_url) && (
-            <a
-              href={(() => {
-                const u = (job.apply_url || job.application_url || '').trim()
-                return u.startsWith('http') ? u : `https://${u}`
-              })()}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="flex items-center gap-1 text-[10px] text-blue-400/70 hover:text-blue-400 transition-colors mt-0.5"
-            >
-              <ExternalLink className="w-2.5 h-2.5" /> via Remotive ↗
-            </a>
-          )}
-          {job.source === 'adzuna' && (job.apply_url || job.application_url) && (
+          {(job.apply_url || job.application_url) && (
             <a
               href={(() => {
                 const u = (job.apply_url || job.application_url || '').trim()
@@ -243,7 +229,7 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
               onClick={(e) => e.stopPropagation()}
               className="flex items-center gap-1 text-[10px] text-violet-400/70 hover:text-violet-400 transition-colors mt-0.5"
             >
-              <ExternalLink className="w-2.5 h-2.5" /> via Adzuna ↗
+              <ExternalLink className="w-2.5 h-2.5" /> via {job.source || 'provider'} ↗
             </a>
           )}
         </div>
@@ -265,17 +251,7 @@ export function JobCard({ entry, onApply, onSave, isTracked = false }: JobCardPr
         )}
       </div>
 
-      {/* Score bar */}
-      <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-700 ${
-            tracked
-              ? 'bg-gradient-to-r from-emerald-500 to-emerald-400'
-              : 'bg-gradient-to-r from-amber-500 to-amber-300'
-          }`}
-          style={{ width: `${match_score}%` }}
-        />
-      </div>
+
 
       {/* Skill diff */}
       <SkillDiff matched={matched_skills} missing={missing_skills} />

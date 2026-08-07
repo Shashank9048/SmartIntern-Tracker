@@ -39,10 +39,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setToken(authToken)
       localStorage.setItem('auth_user', JSON.stringify(profile))
     } catch (error) {
-      console.error('Failed to load user profile:', error)
-      // Only logout on explicit auth failure, not network issues
-      if (error instanceof Error && error.message.includes('401')) {
+      const isNetworkError =
+        error instanceof TypeError ||
+        (error instanceof Error &&
+          (error.message === 'Failed to fetch' ||
+           error.message.includes('NetworkError') ||
+           error.message.includes('unreachable') ||
+           error.message.includes('net::ERR')))
+
+      if (isNetworkError) {
+        // Backend unreachable — stay logged in using cached user from localStorage
+        console.warn('[Auth] Backend unreachable — using cached session. Will retry on next action.')
+        return
+      }
+
+      if (error instanceof Error && (error.message.includes('401') || error.message.includes('403'))) {
+        // Token is invalid or expired — force logout
+        console.warn('[Auth] Token rejected by server — logging out.')
         logout()
+      } else {
+        console.warn('[Auth] Profile fetch failed (non-critical):', error instanceof Error ? error.message : error)
       }
     }
   }, [])

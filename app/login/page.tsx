@@ -22,8 +22,8 @@ declare global {
 export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [email, setEmail] = useState('shashanksingh9048@gmail.com')
+  const [password, setPassword] = useState('Arise')
   const { login, loginWithGoogle } = useAuth()
   const router = useRouter()
 
@@ -50,7 +50,7 @@ export default function LoginPage() {
     setLoading(true)
     try {
       // Use the AuthContext login() which now stores token + loads profile
-      await login(email, password)
+      await login(email.trim(), password)
 
       toast.success('Login successful!')
 

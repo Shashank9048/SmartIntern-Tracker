@@ -21,6 +21,8 @@ class TrackedJobCreate(BaseModel):
     status: Literal[
         "wishlist", "applied", "oa", "interview", "offer", "rejected"
     ] = "wishlist"
+    match_score: Optional[int] = 0
+    job_data: Optional[dict] = None
 
 
 class TrackedJobStatusUpdate(BaseModel):
@@ -86,7 +88,14 @@ async def create_tracked_job(
         job = None
 
     if not job:
-        raise HTTPException(status_code=404, detail=f"Job {body.job_id} not found")
+        if body.job_data:
+            # Bug 1 Fix: Insert the job if it came from the fallback feed
+            new_job = Job(**body.job_data)
+            await new_job.insert()
+            job = new_job
+            body.job_id = str(job.id)
+        else:
+            raise HTTPException(status_code=404, detail=f"Job {body.job_id} not found")
 
     # Idempotency: return existing if already tracked by this user
     existing = await TrackedJob.find_one(
@@ -96,14 +105,15 @@ async def create_tracked_job(
     if existing:
         return await _enrich(existing)
 
-    # Lock match score from UserJobMatch (0 if not computed yet)
-    match_score = 0
-    match_doc = await UserJobMatch.find_one(
-        UserJobMatch.user_id == current_user,
-        UserJobMatch.job_id == body.job_id,
-    )
-    if match_doc:
-        match_score = match_doc.match_score
+    # Bug 2 Fix: Use the score sent by the frontend, otherwise fallback to DB
+    match_score = body.match_score if (body.match_score and body.match_score > 0) else 0
+    if match_score == 0:
+        match = await UserJobMatch.find_one(
+            UserJobMatch.user_id == current_user,
+            UserJobMatch.job_id == str(body.job_id)
+        )
+        if match:
+            match_score = match.match_score
 
     tracked = TrackedJob(
         user_id=current_user,
@@ -173,6 +183,7 @@ async def update_tracked_job_status(
 ):
     """
     Phase 6B: Update the status of a tracked job (called by kanban drag-and-drop).
+    Synchronizes status with the main Application document for Dashboard stats.
     """
     try:
         from beanie import PydanticObjectId
@@ -186,6 +197,47 @@ async def update_tracked_job_status(
     tracked.status = body.status
     tracked.updated_at = datetime.now()
     await tracked.save()
+
+    # Synchronize main Application document status
+    try:
+        from ..models import Application, Job
+        from beanie import PydanticObjectId
+        job = await Job.get(PydanticObjectId(tracked.job_id))
+        if job:
+            app = await Application.find_one(
+                Application.user_id == current_user,
+                Application.company_name == job.company,
+                Application.role == job.title,
+            )
+            app_status = "Applied"
+            if body.status == "interview":
+                app_status = "Interview"
+            elif body.status == "offer":
+                app_status = "Selected"
+            elif body.status == "rejected":
+                app_status = "Rejected"
+            elif body.status == "applied" or body.status == "oa":
+                app_status = "Applied"
+            elif body.status == "wishlist":
+                app_status = "Applied"
+
+            if app:
+                app.status = app_status
+                app.updated_at = datetime.now()
+                await app.save()
+            else:
+                new_app = Application(
+                    user_id=current_user,
+                    company_name=job.company,
+                    role=job.title,
+                    status=app_status,
+                    applied_date=datetime.now(),
+                    job_description=job.description,
+                    ai_match_score=tracked.match_score_at_save if tracked.match_score_at_save > 0 else None,
+                )
+                await new_app.insert()
+    except Exception as ae:
+        logger.warning(f"Could not sync Application status for {id}: {ae}")
 
     logger.info(f"TrackedJob {id} status updated to '{body.status}' for {current_user}")
     return await _enrich(tracked)
@@ -208,6 +260,22 @@ async def delete_tracked_job(
 
     if not tracked or tracked.user_id != current_user:
         raise HTTPException(status_code=404, detail="TrackedJob not found or unauthorized")
+
+    # Synchronize Application document deletion
+    try:
+        from ..models import Application, Job
+        from beanie import PydanticObjectId
+        job = await Job.get(PydanticObjectId(tracked.job_id))
+        if job:
+            app = await Application.find_one(
+                Application.user_id == current_user,
+                Application.company_name == job.company,
+                Application.role == job.title,
+            )
+            if app:
+                await app.delete()
+    except Exception as ae:
+        logger.warning(f"Could not delete synced Application for {id}: {ae}")
 
     await tracked.delete()
     return {"message": "TrackedJob deleted", "id": id}

@@ -61,9 +61,9 @@ export function AIChatbot() {
     try {
       const reply = await chatWithAI(userInput)
 
-      // Check if backend returned an error string
-      if (reply.startsWith("Error:") || reply.startsWith("System Error:")) {
-        throw new Error(reply);
+      // Check if backend returned an error string (legacy path, shouldn't happen after backend fix)
+      if (reply && (reply.startsWith("Error:") || reply.startsWith("System Error:"))) {
+        throw new Error("AI service is temporarily unavailable. Please try again in a moment.");
       }
 
       const assistantMessage: Message = {
@@ -73,16 +73,34 @@ export function AIChatbot() {
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])
-    } catch (error) {
-      console.error("Chat Error:", error)
-      const errorMsg = error instanceof Error ? error.message : 'Failed to connect to AI.'
+    } catch (error: unknown) {
+      console.error("[Chat Error] handleSendMessage:", error)
 
-      toast.error(errorMsg)
+      // Determine a clean, user-friendly message based on error type
+      let friendlyMsg = "I'm having trouble connecting right now. Please try again in a moment."
+
+      if (error instanceof Error) {
+        const msg = error.message || ''
+        if (msg.includes('503') || msg.includes('temporarily unavailable') || msg.includes('quota')) {
+          friendlyMsg = "I'm temporarily unavailable — the AI models are at capacity. Please try again in a few minutes."
+        } else if (msg.includes('401') || msg.includes('Unauthorized')) {
+          friendlyMsg = "Your session has expired. Please log in again."
+        } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('ECONNREFUSED')) {
+          friendlyMsg = "Cannot reach the server. Please check your connection or ensure the backend is running."
+        } else if (msg.includes('404')) {
+          friendlyMsg = "The AI chat endpoint was not found. Please contact support."
+        } else if (msg.length > 0 && msg.length < 120 && !msg.includes('{') && !msg.includes('NOT_FOUND')) {
+          // Only surface the error message if it's short and clean (not raw JSON / API error)
+          friendlyMsg = msg
+        }
+      }
+
+      toast.error(friendlyMsg)
 
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `⚠️ ${errorMsg}`,
+        content: `⚠️ ${friendlyMsg}`,
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, errorMessage])

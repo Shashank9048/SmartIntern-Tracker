@@ -6,11 +6,20 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import os
 
-# CONFIG
-# In production, use os.environ.get("SECRET_KEY")
-SECRET_KEY = os.environ.get("SECRET_KEY", "YOUR_SUPER_SECRET_KEY_CHANGE_THIS")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 3000
+# CONFIG — Security-critical values must be set in the environment.
+# SECRET_KEY: intentionally has NO default fallback. If unset the server
+# crashes at startup rather than silently signing tokens with a public key.
+_secret_key = os.environ.get("SECRET_KEY")
+if not _secret_key:
+    raise RuntimeError(
+        "SECRET_KEY environment variable is not set. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\" "
+        "and add it to your .env file."
+    )
+SECRET_KEY: str = _secret_key
+ALGORITHM = os.environ.get("ALGORITHM", "HS256")
+# ACCESS_TOKEN_EXPIRE_MINUTES: read from env, default 60 minutes for production safety.
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")

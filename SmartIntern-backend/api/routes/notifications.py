@@ -84,3 +84,19 @@ async def mark_read(
         logger.error(f"Error marking notification read: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@router.get("/unread-count")
+async def get_unread_count(
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Returns count of unread notifications for the current user.
+    Used by the notification bell badge.
+    """
+    count = await Notification.find(
+        Notification.user_id == current_user,
+        Notification.read_bool == False,
+    ).count()
+    return {"count": count}
+
+

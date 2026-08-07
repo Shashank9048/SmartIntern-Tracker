@@ -26,7 +26,9 @@ export function NotificationBell() {
         setNotifications(data)
         setUnreadCount(data.filter(n => !n.read_bool).length)
       } catch (error) {
-        console.error('Failed to fetch notifications', error)
+        // Silently ignore network errors (backend unreachable) — bell stays quiet
+        if (error instanceof Error && (error.name === 'NetworkError' || error.message.startsWith('NetworkError'))) return
+        console.warn('[NotificationBell] Failed to fetch notifications:', error)
       }
     }
 

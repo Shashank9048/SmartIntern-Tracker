@@ -16,8 +16,14 @@ export function AIInsights() {
       const data = await getDashboardInsights()
       setInsights(data)
     } catch (error) {
-      toast.error('Failed to load AI Insights')
-      console.error(error)
+      // getDashboardInsights already returns null for network errors.
+      // Only show toast for actual API errors (not offline/unreachable).
+      const isNetworkErr = error instanceof TypeError ||
+        (error instanceof Error && (error.message === 'Failed to fetch' || error.message.startsWith('NetworkError')))
+      if (!isNetworkErr) {
+        toast.error('Failed to load AI Insights')
+        console.warn('[AIInsights] Error:', error)
+      }
     } finally {
       setLoading(false)
     }

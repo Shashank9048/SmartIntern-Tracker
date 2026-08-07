@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie, PydanticObjectId
 from contextlib import asynccontextmanager
@@ -14,8 +15,15 @@ import asyncio
 import hashlib
 import logging
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 logger = logging.getLogger(__name__)
+
+# ── Rate Limiter (in-memory, per-IP) ──────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
 
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -57,7 +65,7 @@ async def run_automation_scheduler():
     """Background job: fire due automations every 60 seconds."""
     while True:
         try:
-            now = datetime.now()
+            now = datetime.utcnow()
             due = []
             try:
                 due = await Automation.find(
@@ -92,40 +100,61 @@ async def run_automation_scheduler():
                     email_sent = False
                     email_error = None
                     if automation.email_enabled:
-                        user = await User.find_one(User.email == automation.user_id)
-                        to_email = user.email if user else automation.user_id
-                        scheduled_str = automation.scheduled_at.strftime("%B %d, %Y at %I:%M %p")
-                        result = send_automation_email(
-                            to_email=to_email,
-                            company=company,
-                            role=role,
-                            automation_type=automation.type,
-                            scheduled_at=scheduled_str,
-                            ai_tips=ai_tips,
-                        )
-                        email_sent = result.get("status") == "sent"
-                        email_error = result.get("error")
+                        try:
+                            user = await User.find_one(User.email == automation.user_id)
+                            to_email = user.email if user else automation.user_id
+                            scheduled_str = automation.scheduled_at.strftime("%B %d, %Y at %I:%M %p")
+                            result = send_automation_email(
+                                to_email=to_email,
+                                company=company,
+                                role=role,
+                                automation_type=automation.type,
+                                scheduled_at=scheduled_str,
+                                ai_tips=ai_tips,
+                            )
+                            email_sent = result.get("status") == "sent" if isinstance(result, dict) else False
+                            email_error = result.get("error") if isinstance(result, dict) else str(result)
+                        except Exception as ee:
+                            print(f"⚠️ send_automation_email error: {ee}")
+                            email_sent = False
+                            email_error = str(ee)
 
-                    # Mark completed — or failed if email delivery was required but failed
-                    if automation.email_enabled and not email_sent:
-                        automation.status = "failed"
-                        print(f"[automation] {automation.id} marked FAILED — email not sent: {email_error}")
-                    else:
-                        automation.status = "completed"
+                    # Always create an in-app Notification doc so user sees it on the site
+                    try:
+                        notif_msg = f"Automation reminder: {automation.type.capitalize()} for {role} at {company}"
+                        notif = Notification(
+                            user_id=automation.user_id,
+                            type=automation.type,
+                            payload={
+                                "message": notif_msg,
+                                "application_id": automation.application_id,
+                                "company": company,
+                                "role": role,
+                                "ai_tips": ai_tips,
+                            }
+                        )
+                        await notif.insert()
+                    except Exception as ne:
+                        print(f"⚠️ Notification insert error: {ne}")
+
+                    # Transition status from active -> completed (or failed) so it never stays stuck as overdue
+                    automation.status = "completed" if (email_sent or not automation.email_enabled) else "failed"
                     await automation.save()
 
                     # Log result
-                    log = AutomationLog(
-                        automation_id=str(automation.id),
-                        user_id=automation.user_id,
-                        email_sent=email_sent,
-                        ai_tips=ai_tips,
-                        error=email_error,
-                    )
-                    await log.insert()
-                    status_str = "completed" if automation.status == "completed" else "FAILED"
-                    print(f"[automation] {automation.id} {status_str}. email_sent={email_sent}")
+                    try:
+                        log = AutomationLog(
+                            automation_id=str(automation.id),
+                            user_id=automation.user_id,
+                            email_sent=email_sent,
+                            ai_tips=ai_tips,
+                            error=email_error,
+                        )
+                        await log.insert()
+                    except Exception as le:
+                        print(f"⚠️ AutomationLog insert error: {le}")
 
+                    print(f"[automation] {automation.id} {automation.status}. email_sent={email_sent}")
 
                 except Exception as e:
                     print(f"❌ Error firing automation {automation.id}: {e}")
@@ -158,15 +187,12 @@ async def lifespan(app: FastAPI):
         print("⚠️ WARNING: MONGODB_URL not found")
 
     gmail_user = os.environ.get("GMAIL_USER")
+    gmail_user = os.environ.get("GMAIL_USER")
     gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
     if not gmail_user or not gmail_pass:
         print("⚠️ WARNING: Gmail credentials not found. Set GMAIL_USER and GMAIL_APP_PASSWORD in .env for email automation.")
     else:
         print(f"✅ Gmail Credentials Found ({gmail_user})")
-
-    # Start background automation scheduler native to event loop
-    automation_task = asyncio.create_task(run_automation_scheduler())
-    print("✅ Automation Scheduler Started (60s interval)")
 
     from services.scheduler import NotificationScheduler
     notif_scheduler = NotificationScheduler()
@@ -177,18 +203,44 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    automation_task.cancel()
     notif_scheduler.scheduler.shutdown()
     print("🛑 Automation Scheduler Stopped")
 
 app = FastAPI(lifespan=lifespan)
 
+# Attach rate-limiter state and its 429 exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+
+# ── CORS Origins ──────────────────────────────────────────────────────────────
+_cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://192.168.56.1:3000",  # LAN network origin seen in Next.js dev
+]
+
+# Allow additional production frontend URLs via either env var (comma-separated).
+# ALLOWED_ORIGINS is the canonical name documented in the security fix.
+# FRONTEND_URL is kept for backward compat with existing deployments that already set it.
+# NOTE: this only works if the env var is actually populated — it does NOT auto-discover.
+for _env_var in ("ALLOWED_ORIGINS", "FRONTEND_URL"):
+    for _origin in os.environ.get(_env_var, "").split(","):
+        _origin = _origin.strip()
+        if _origin and _origin not in _cors_origins:
+            _cors_origins.append(_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 import shutil
@@ -247,7 +299,12 @@ async def signup(user_data: UserSignup):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/login", response_model=Token)
-async def login(user_data: UserAuth):
+@limiter.limit("5/minute")
+async def login(request: Request, user_data: UserAuth):
+    """
+    SECURITY: Rate-limited to 5 attempts per minute per IP address.
+    Exceeding the limit returns HTTP 429 Too Many Requests.
+    """
     user = await User.find_one(User.email == user_data.email)
     if not user or not verify_password(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -587,22 +644,7 @@ class ParseResumeRequest(BaseModel):
 async def api_parse_resume(req: ParseResumeRequest, current_user: str = Depends(get_current_user)):
     return await parse_resume_json(req.resume_text)
 
-# 3. AI FEATURES
-class EmailRequest(BaseModel):
-    job_description: str
-    recruiter_email: Optional[str] = None
-    role: Optional[str] = "Developer"
-
-@app.post("/automation/send-cold-email")
-async def send_cold_email_endpoint(req: EmailRequest, current_user: str = Depends(get_current_user)):
-    email_body = await generate_cold_email_ai(req.job_description, req.role)
-    if req.recruiter_email:
-        result = send_email_smtp(req.recruiter_email, f"Application for {req.role}", email_body)
-        if "error" in result:
-             raise HTTPException(status_code=500, detail=result["error"])
-        return {"message": "Email sent!", "body": email_body}
-    return {"message": "Email generated (not sent)", "body": email_body}
-
+# 3. AI FEATURES (Routes moved to api/routes/ai.py and api/routes/automation.py)
 # 4. CHAT ASSISTANT
 class ChatRequest(BaseModel):
     message: str
@@ -629,6 +671,14 @@ async def ai_chat(req: ChatRequest, current_user: str = Depends(get_current_user
 
     # Generate response
     response = await get_career_coach_response(req.message, resume_context=full_prompt_context)
+
+    # Guard: if all Gemini models failed, return a clean 503 instead of raw error text
+    if not response or response.startswith("Error:"):
+        logger.warning("[/ai/chat] Gemini response failed for user %s: %s", current_user, (response or "None")[:200])
+        raise HTTPException(
+            status_code=503,
+            detail="AI service is temporarily unavailable. All models are either quota-exhausted or not responding. Please try again in a few minutes.",
+        )
 
     # Save to history
     from .models import ChatMessage
@@ -1130,6 +1180,17 @@ async def api_delete_resume(current_user: str = Depends(get_current_user)):
     except Exception as ae:
         print(f"⚠️ Warning: could not delete ResumeAnalysis records: {ae}")
 
+    # 4. Invalidate stale UserJobMatch records for this user.
+    # SECURITY FIX: previously the function claimed to do this in its success message
+    # but never actually did — UserJobMatch records were left orphaned, causing the
+    # match/status endpoint to remain "ready" with stale scores even after the
+    # resume was deleted and a new one uploaded.
+    try:
+        match_deleted = await UserJobMatch.find(UserJobMatch.user_id == current_user).delete()
+        print(f"✅ Invalidated {match_deleted} stale UserJobMatch records for {current_user}")
+    except Exception as ae:
+        print(f"⚠️ Warning: could not delete UserJobMatch records: {ae}")
+
     return {"success": True, "message": "Resume deleted successfully and job match records invalidated"}
 
 
@@ -1245,7 +1306,7 @@ Output ONLY raw JSON:
 @app.get("/api/automations/stats")
 async def get_automation_stats(current_user: str = Depends(get_current_user)):
     """Overview counts for the automation dashboard section."""
-    now = datetime.now()
+    now = datetime.utcnow()
     from datetime import timedelta
     week_end = now + timedelta(days=7)
 
@@ -1257,14 +1318,14 @@ async def get_automation_stats(current_user: str = Depends(get_current_user)):
     interview_ids = [a.application_id for a in upcoming if a.type == "interview"]
     interviews_this_week = len(set(interview_ids))
 
-    # Follow-ups due (overdue active)
-    followups_due = len([a for a in active if a.type == "followup" and a.scheduled_at <= now])
+    # Overdue active automations (all types)
+    overdue_count = len([a for a in active if a.scheduled_at <= now])
 
     return {
         "total_active": len(active),
         "upcoming_reminders": len(upcoming),
         "interviews_this_week": interviews_this_week,
-        "followups_due": followups_due,
+        "overdue_count": overdue_count,
     }
 
 
@@ -1321,7 +1382,7 @@ async def create_automation(data: AutomationCreate, current_user: str = Depends(
         email_enabled=data.email_enabled,
         ai_prep_enabled=data.ai_prep_enabled,
         status="active",
-        created_at=datetime.now(),
+        created_at=datetime.utcnow(),
     )
     await auto.insert()
 
@@ -1378,6 +1439,12 @@ app.include_router(tracked_jobs_router)
 from .routes.notifications import router as notifications_router
 app.include_router(notifications_router)
 
+from .routes.ai import router as ai_router
+app.include_router(ai_router)
+
+from .routes.automation import router as automation_router
+app.include_router(automation_router)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Part C — Admin Debug Endpoints
@@ -1388,7 +1455,13 @@ async def admin_trigger_digest(current_user: str = Depends(get_current_user)):
     """
     Manually fire the weekly digest job for testing/debugging.
     Creates Notification docs and attempts email send.
+
+    SECURITY FIX: previously any authenticated user could trigger this.
+    Now requires is_admin == True.
     """
+    admin_user = await User.find_one(User.email == current_user)
+    if not admin_user or not admin_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
     from services.scheduler import NotificationScheduler
     scheduler = NotificationScheduler()
     await scheduler.run_weekly_digest()
@@ -1399,7 +1472,13 @@ async def admin_trigger_digest(current_user: str = Depends(get_current_user)):
 async def admin_trigger_reminders(current_user: str = Depends(get_current_user)):
     """
     Manually fire the deadline/interview reminder job for testing/debugging.
+
+    SECURITY FIX: previously any authenticated user could trigger this.
+    Now requires is_admin == True.
     """
+    admin_user = await User.find_one(User.email == current_user)
+    if not admin_user or not admin_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
     from services.scheduler import NotificationScheduler
     scheduler = NotificationScheduler()
     await scheduler.run_deadline_reminders()

@@ -1,0 +1,1 @@
+import os, sys; sys.path.insert(0, os.path.abspath('.')); from dotenv import load_dotenv; load_dotenv(); from api.gmail_utils import send_automation_email; print(send_automation_email('shashanksingh9048@gmail.com', 'Test Corp', 'SWE Intern', 'interview', 'Tomorrow 10 AM', None))

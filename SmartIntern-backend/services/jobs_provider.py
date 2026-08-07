@@ -46,6 +46,15 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import asyncio
+from dotenv import load_dotenv
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+while current_dir != os.path.dirname(current_dir):
+    env_path = os.path.join(current_dir, ".env")
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        break
+    current_dir = os.path.dirname(current_dir)
 
 # Assuming models are in api.models (adjust import if needed)
 from api.models import Job
@@ -93,7 +102,7 @@ def _get_direct_apply_url(raw: dict, source: str) -> Optional[str]:
       Arbeitnow    → url          (direct ATS link — Greenhouse/Lever/etc.) ✅
       Adzuna       → redirect_url (direct employer redirect) ✅
       Remotive     → url          (direct employer link) ✅
-      JSearch      → job_apply_link → apply_options[0].apply_link (ATS deeplink)
+      JSearch      → job_apply_link, falling back to apply_options[0].apply_link
       Himalayas    → applicationLink ⚠️ returns himalayas.app internal pages;
                      filtered by _is_direct_employer_url → yields None → job discarded
       Jooble       → link         (direct job link, confirmed from Jooble API docs)
@@ -105,78 +114,31 @@ def _get_direct_apply_url(raw: dict, source: str) -> Optional[str]:
     NOTE: No Google-search fallback is generated here. A missing link means
     the job is silently dropped, never stored, never shown.
     """
+    candidate = ""
     if source == "adzuna":
-        candidate = raw.get("redirect_url") or raw.get("apply_url") or ""
+        candidate = raw.get("redirect_url") or ""
     elif source == "remotive":
-        candidate = raw.get("url") or raw.get("apply_url") or ""
+        candidate = raw.get("url") or ""
     elif source == "jsearch":
         candidate = raw.get("job_apply_link") or ""
-        if not _is_real_url(candidate):
-            # JSearch secondary: apply_options array (ATS deeplink)
+        if not candidate:
             options = raw.get("apply_options") or []
             if options and isinstance(options, list):
                 first = options[0]
-                candidate = (
-                    first.get("apply_link") or
-                    first.get("link") or
-                    first.get("url") or
-                    ""
-                )
+                candidate = first.get("apply_link") or ""
     elif source == "arbeitnow":
         candidate = raw.get("url") or ""
     elif source == "himalayas":
-        # applicationLink field confirmed via live test — BUT it returns
-        # Himalayas' own internal listing pages (himalayas.app/companies/...),
-        # not direct employer ATS links. _is_direct_employer_url filters these out.
         candidate = raw.get("applicationLink") or ""
     elif source == "jooble":
         candidate = raw.get("link") or ""
     elif source == "careeronestop":
         candidate = raw.get("JobURL") or ""
-    else:
-        # Generic fallback order for unknown sources
-        candidate = (
-            raw.get("job_apply_link") or
-            raw.get("url") or
-            raw.get("redirect_url") or
-            raw.get("apply_url") or
-            ""
-        )
 
     stripped = candidate.strip() if candidate else ""
     # Use _is_direct_employer_url which checks both valid URL format AND
     # that it does not point to an internal job-board page (e.g. himalayas.app)
     return stripped if _is_direct_employer_url(stripped) else None
-
-
-def _resolve_apply_url(raw: dict, source: str) -> str:
-    """
-    Legacy shim used only by GET /jobs/today (display path, not persisted).
-    Falls back to a Google-search URL so display cards are never broken.
-    Do NOT use this function in the sync/upsert path.
-    """
-    url = _get_direct_apply_url(raw, source)
-    if url:
-        return url
-
-    # Display-only fallback: Google search
-    company = (
-        raw.get("employer_name") or
-        raw.get("company_name") or
-        raw.get("company") or
-        ""
-    ).replace(" ", "+")
-    title = (
-        raw.get("job_title") or
-        raw.get("title") or
-        "Job"
-    ).replace(" ", "+")
-    fallback = f"https://www.google.com/search?q={company}+{title}+careers+apply"
-    logger.debug(
-        f"[{source}] No direct apply URL — using Google fallback (display only) "
-        f"for {raw.get('job_title') or raw.get('title', '?')}"
-    )
-    return fallback
 
 
 def _infer_work_mode_from_text(*texts: str) -> str:
@@ -227,10 +189,16 @@ class AdzunaProvider(JobsProvider):
     ]
 
     def __init__(self):
-        self.app_id = os.getenv("ADZUNA_APP_ID", "")
-        self.app_key = os.getenv("ADZUNA_APP_KEY", "")
         self._cache: List[Job] = []
         self._cache_ts: float = 0.0
+
+    @property
+    def app_id(self) -> str:
+        return os.getenv("ADZUNA_APP_ID", "").strip()
+
+    @property
+    def app_key(self) -> str:
+        return os.getenv("ADZUNA_APP_KEY", "").strip()
 
     async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
         import time
@@ -258,7 +226,8 @@ class AdzunaProvider(JobsProvider):
             ]
         if location:
             loc_lower = location.lower()
-            jobs = [j for j in jobs if loc_lower in j.location.lower()]
+            if loc_lower not in ("india", "in"):
+                jobs = [j for j in jobs if loc_lower in j.location.lower()]
 
         return jobs[:limit]
 
@@ -490,10 +459,13 @@ class JSearchProvider(JobsProvider):
     DAILY_LIMIT_SECONDS = 23 * 3600  # 23 hours between fetches
 
     def __init__(self):
-        self.api_key = os.getenv("RAPIDAPI_KEY")
         self.base_url = "https://jsearch.p.rapidapi.com/search"
         self._last_fetch_ts: float = 0.0
         self._cache: List[Job] = []
+
+    @property
+    def api_key(self) -> str:
+        return os.getenv("RAPIDAPI_KEY", "").strip()
 
     async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 20) -> List[Job]:
         import time
@@ -801,7 +773,7 @@ class MockJobsProvider(JobsProvider):
                 location=loc,
                 source=item["source"],
                 external_id=f"mock-{i}",
-                application_url=item["application_url"],
+                application_url=None,
                 posted_at=posted_time,
                 deadline=deadline_time,
                 is_active=True,
@@ -1026,7 +998,11 @@ class JoobleProvider(JobsProvider):
     BASE_URL = "https://jooble.org/api/"
 
     def __init__(self):
-        self.api_key = os.getenv("JOOBLE_API_KEY", "")
+        pass
+
+    @property
+    def api_key(self) -> str:
+        return os.getenv("JOOBLE_API_KEY", "").strip()
 
     async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
         if not self.api_key:
@@ -1090,8 +1066,15 @@ class CareerOneStopProvider(JobsProvider):
     BASE_URL = "https://api.careeronestop.org/v1/jobsearch"
 
     def __init__(self):
-        self.user_id = os.getenv("CAREERONESTOP_USER_ID", "")
-        self.token = os.getenv("CAREERONESTOP_TOKEN", "")
+        pass
+
+    @property
+    def user_id(self) -> str:
+        return os.getenv("CAREERONESTOP_USER_ID", "").strip()
+
+    @property
+    def token(self) -> str:
+        return os.getenv("CAREERONESTOP_TOKEN", "").strip()
 
     async def fetch_jobs(self, query: str = "", location: str = "", limit: int = 50) -> List[Job]:
         if not self.user_id or not self.token:

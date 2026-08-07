@@ -113,7 +113,7 @@ export class GeminiService {
       }
 
       const response = await APIClient.post<any>(
-        '/automation/send-cold-email',
+        '/api/ai/generate-cold-email',
         payload
       )
 

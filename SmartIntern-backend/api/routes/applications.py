@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from typing import List
 from beanie import PydanticObjectId
 from ..models import Application, User, ApplicationCreate, ApplicationUpdate
@@ -19,30 +19,28 @@ async def get_app(id: PydanticObjectId, current_user: str = Depends(get_current_
         raise HTTPException(status_code=404, detail="Application not found")
     return app
 
+async def _process_ai_resume_match(app_id: PydanticObjectId, resume_text: str, job_desc: str):
+    try:
+        from ..ai_utils import analyze_resume_match
+        from ..models import Application
+        analysis = await analyze_resume_match(resume_text, job_desc)
+        app = await Application.get(app_id)
+        if app:
+            app.ai_match_score = analysis.get("overall_match_score", 0)
+            app.ai_experience_alignment = analysis.get("experience_alignment", "Low")
+            app.ai_summary = analysis.get("summary", "")
+            app.ai_missing_skills = analysis.get("missing_skills", [])
+            app.ai_suggestions = analysis.get("improvement_suggestions", [])
+            await app.save()
+    except Exception as e:
+        print(f"Background AI Score Error: {e}")
+
 @router.post("", response_model=Application)
-async def create_app(app_data: ApplicationCreate, current_user: str = Depends(get_current_user)):
+async def create_app(app_data: ApplicationCreate, background_tasks: BackgroundTasks, current_user: str = Depends(get_current_user)):
     user = await User.find_one(User.email == current_user)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    match_score = None
-    experience_alignment = None
-    summary = None
-    missing_skills = []
-    suggestions = []
-
-    if user.resume_text:
-        try:
-            job_desc = app_data.job_description if app_data.job_description else f"{app_data.role} at {app_data.company_name}"
-            analysis = await analyze_resume_match(user.resume_text, job_desc)
-            match_score = analysis.get("overall_match_score", 0)
-            experience_alignment = analysis.get("experience_alignment", "Low")
-            summary = analysis.get("summary", "")
-            missing_skills = analysis.get("missing_skills", [])
-            suggestions = analysis.get("improvement_suggestions", [])
-        except Exception as e:
-            print(f"Background AI Score Error: {e}")
-
     new_app = Application(
         user_id=user.email,
         company_name=app_data.company_name,
@@ -52,13 +50,18 @@ async def create_app(app_data: ApplicationCreate, current_user: str = Depends(ge
         interview_date=app_data.interview_date,
         notes=app_data.notes,
         job_description=app_data.job_description,
-        ai_match_score=match_score,
-        ai_experience_alignment=experience_alignment,
-        ai_summary=summary,
-        ai_missing_skills=missing_skills,
-        ai_suggestions=suggestions
+        ai_match_score=None,
+        ai_experience_alignment=None,
+        ai_summary=None,
+        ai_missing_skills=[],
+        ai_suggestions=[]
     )
     await new_app.insert()
+
+    if user.resume_text:
+        job_desc = app_data.job_description if app_data.job_description else f"{app_data.role} at {app_data.company_name}"
+        background_tasks.add_task(_process_ai_resume_match, new_app.id, user.resume_text, job_desc)
+
     return new_app
 
 @router.patch("/{id}", response_model=Application)
@@ -83,6 +86,24 @@ async def delete_app(id: PydanticObjectId, current_user: str = Depends(get_curre
     app = await Application.get(id)
     if not app or app.user_id != current_user:
         raise HTTPException(status_code=404, detail="Application not found")
+        
+    try:
+        from ..models import Job, TrackedJob
+        jobs = await Job.find(
+            Job.company == app.company_name,
+            Job.title == app.role
+        ).to_list()
+        
+        for job in jobs:
+            tracked = await TrackedJob.find_one(
+                TrackedJob.user_id == current_user,
+                TrackedJob.job_id == str(job.id)
+            )
+            if tracked:
+                await tracked.delete()
+    except Exception as e:
+        print(f"Failed to delete synced tracked job: {e}")
+        
     await app.delete()
     return {"message": "Application deleted", "id": str(id)}
 

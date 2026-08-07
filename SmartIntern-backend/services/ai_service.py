@@ -14,58 +14,86 @@ client = None
 if api_key:
     client = genai.Client(api_key=api_key)
 
-AVAILABLE_MODELS = [
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
+# ── Confirmed-working models (tested 2026-08-04, ordered by preference) ─────────
+# Verified live against this API key – models that return generateContent.
+# gemini-3.x series have their own free-tier quotas (unexhausted).
+# gemini-2.x series are quota-exhausted on the free tier; kept as last-resort
+# fallback in case daily quotas reset mid-day.
+DEFAULT_MODELS = [
+    # --- Confirmed working (tested 2026-08-04) ---
+    'gemini-3.5-flash',            # Best quality among working models
+    'gemini-3.6-flash',            # Slightly newer backup
+    'gemini-3.5-flash-lite',       # Faster/lighter version
+    'gemini-3.1-flash-lite',       # Stable, confirmed working
+    'gemini-flash-lite-latest',    # Latest flash-lite alias
+    'gemini-flash-latest',         # Latest flash alias
+    'gemini-3.1-flash-lite-preview',  # Preview fallback
+    'gemini-3-flash-preview',      # Older preview, confirmed working
+    # --- Quota-exhausted on free tier (fallback when quotas reset) ---
+    'gemini-2.5-flash',            # Quota exhausted but real model
+    'gemini-2.0-flash',            # Quota exhausted but real model
+    'gemini-2.0-flash-lite',       # Quota exhausted but real model
 ]
 
-async def get_gemini_response(prompt: str, retries: int = 3, delay: int = 5):
+# Allow overriding the primary model via env variable (insert it at position 0)
+# NOTE: Do NOT set GEMINI_MODEL to old models like gemini-1.5-flash (removed from API).
+env_model = os.environ.get("GEMINI_MODEL", "").strip()
+if env_model and env_model not in DEFAULT_MODELS:
+    AVAILABLE_MODELS = [env_model] + DEFAULT_MODELS
+elif env_model:
+    AVAILABLE_MODELS = [env_model] + [m for m in DEFAULT_MODELS if m != env_model]
+else:
+    AVAILABLE_MODELS = DEFAULT_MODELS
+
+async def get_gemini_response(prompt: str, retries: int = 2, delay: int = 2):
+    """
+    Calls Gemini with automatic model fallback.
+    - 404 NOT_FOUND       → immediately skip to next model (model removed/deprecated)
+    - 429 RESOURCE_EXHAUSTED → skip to next model (quota exceeded)
+    - Other errors        → exponential backoff then skip to next model
+    Returns text response, or Error: prefixed string if all models fail.
+    """
     if not client:
         return "Error: Gemini API Key not configured."
-        
+
     last_error = None
-    
+
     for model_name in AVAILABLE_MODELS:
-        try:
-            for attempt in range(retries):
-                try:
-                    response = await asyncio.to_thread(
-                        client.models.generate_content,
-                        model=model_name,
-                        contents=prompt,
-                    )
+        for attempt in range(retries):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and hasattr(response, 'text') and response.text:
+                    print(f"[Gemini] Success with model '{model_name}' (attempt {attempt + 1})")
                     return response.text
-                except Exception as e:
-                    error_str = str(e)
-                    last_error = e
-                    
-                    if "429" in error_str or "quota" in error_str.lower():
-                        match_seconds = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", error_str)
-                        match_text_seconds = re.search(r"retry in (\d+\.?\d*)s", error_str)
-                        
-                        wait_time = delay * (2 ** attempt)
-                        
-                        if match_seconds:
-                            wait_time = int(match_seconds.group(1)) + 1
-                        elif match_text_seconds:
-                            wait_time = float(match_text_seconds.group(1)) + 1
-                            
-                        if attempt == 0 and model_name != AVAILABLE_MODELS[-1]:
-                            print(f"⚠️ Quota exceeded on {model_name}. Switching model...")
-                            break 
-                            
-                        print(f"⚠️ Quota exceeded on {model_name}. Retrying in {wait_time:.1f}s...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    
-                    print(f"❌ Gemini Error ({model_name}): {e}")
-                    break 
+                # Empty response — try next attempt/model
+                print(f"[Gemini] Model '{model_name}' returned empty response")
+                break
 
-        except Exception as e:
-            print(f"❌ Setup Error ({model_name}): {e}")
-            continue
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
 
+                # 404 = model not found/deprecated → skip immediately
+                if "404" in error_str or "NOT_FOUND" in error_str:
+                    print(f"[Gemini] Model '{model_name}' returned 404/NOT_FOUND. Skipping to next model.")
+                    break
+
+                # 429 = quota/rate limit → skip to next model
+                if ("429" in error_str or "RESOURCE_EXHAUSTED" in error_str
+                        or "quota" in error_str.lower()):
+                    print(f"[Gemini] Model '{model_name}' quota exhausted. Skipping to next model.")
+                    break
+
+                # Transient error — exponential backoff
+                wait_time = delay * (2 ** attempt)
+                print(f"[Gemini] Model '{model_name}' error (attempt {attempt + 1}/{retries}): {error_str[:100]}. Retrying in {wait_time}s...")
+                await asyncio.sleep(min(wait_time, 8))
+
+    print(f"[Gemini] All models exhausted. Last error: {last_error}")
     return f"Error: AI service is currently busy. Please try again later. (Details: {str(last_error)})"
 
 async def _parse_gemini_json_safe(raw_text: str) -> dict:

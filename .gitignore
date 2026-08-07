@@ -23,3 +23,6 @@ __pycache__/
 # Uploaded/Personal Files (Optional, adjust to your project needs)
 static/resumes/*.pdf
 *.pdf
+# Ignore Python virtual environment
+SmartIntern-backend/venv/
+venv/

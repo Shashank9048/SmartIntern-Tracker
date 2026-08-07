@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   DndContext,
   DragEndEvent,
@@ -10,7 +10,10 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
-  closestCenter,
+  useDroppable,
+  pointerWithin,
+  rectIntersection,
+  closestCorners,
 } from '@dnd-kit/core'
 import {
   SortableContext,
@@ -19,7 +22,6 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Building2, MapPin, GripVertical, Trash2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { TrackedJobEntry, TrackedJobStatus } from '@/types'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,14 +63,7 @@ function KanbanCard({ item, onDelete, isDragOverlay = false }: KanbanCardProps) 
     opacity: isDragging ? 0.4 : 1,
   }
 
-  const scoreColour =
-    item.match_score_at_save >= 85
-      ? 'text-amber-400'
-      : item.match_score_at_save >= 70
-      ? 'text-amber-300'
-      : item.match_score_at_save >= 50
-      ? 'text-amber-200/70'
-      : 'text-white/40'
+
 
   return (
     <div
@@ -100,13 +95,7 @@ function KanbanCard({ item, onDelete, isDragOverlay = false }: KanbanCardProps) 
             <span className="text-xs text-muted-foreground truncate">{item.job.company}</span>
           </div>
         </div>
-        {/* Score badge */}
-        <span
-          className={`font-mono text-base font-bold tabular-nums shrink-0 ${scoreColour}`}
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {item.match_score_at_save}%
-        </span>
+
       </div>
 
       {/* Location */}
@@ -140,9 +129,16 @@ interface KanbanColumnProps {
 }
 
 function KanbanColumn({ col, items, onDelete }: KanbanColumnProps) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: col.id,
+  })
+
   return (
     <div
-      className={`flex-1 min-w-[230px] max-w-[280px] rounded-xl border p-3 flex flex-col gap-2 ${col.colour}`}
+      ref={setNodeRef}
+      className={`flex-1 min-w-[230px] max-w-[280px] rounded-xl border p-3 flex flex-col gap-2 ${col.colour} ${
+        isOver ? 'ring-2 ring-amber-400/50 bg-white/[0.08]' : ''
+      } transition-all duration-200`}
     >
       {/* Header */}
       <div className="flex items-center gap-2 pb-2 border-b border-white/10">
@@ -160,14 +156,14 @@ function KanbanColumn({ col, items, onDelete }: KanbanColumnProps) {
         items={items.map((i) => i._id)}
         strategy={verticalListSortingStrategy}
       >
-        <div className="flex flex-col gap-2 flex-1 min-h-[80px]">
+        <div className="flex flex-col gap-2 flex-1 min-h-[120px]">
           {items.map((item) => (
             <KanbanCard key={item._id} item={item} onDelete={onDelete} />
           ))}
           {items.length === 0 && (
-            <div className="flex-1 flex items-center justify-center">
+            <div className="flex-1 flex items-center justify-center border border-dashed border-white/10 rounded-lg py-6">
               <p
-                className="text-xs text-white/20 font-mono"
+                className="text-xs text-white/30 font-mono"
                 style={{ fontFamily: "'JetBrains Mono', monospace" }}
               >
                 Drop here
@@ -194,22 +190,18 @@ export function KanbanBoard({ items, onStatusChange, onDelete }: KanbanBoardProp
   const [activeId, setActiveId] = useState<string | null>(null)
   const [localItems, setLocalItems] = useState<TrackedJobEntry[]>(items)
 
-  // Keep local state in sync when parent updates (initial fetch)
-  // We use local state for optimistic drag updates
-  const currentItems = localItems.length ? localItems : items
+  // Keep local state in sync whenever items prop changes
+  useEffect(() => {
+    setLocalItems(items)
+  }, [items])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: { distance: 8 },
+      activationConstraint: { distance: 5 },
     })
   )
 
-  const activeItem = currentItems.find((i) => i._id === activeId) ?? null
-
-  function findColumnForItem(id: string): TrackedJobStatus | null {
-    const item = currentItems.find((i) => i._id === id)
-    return item?.status ?? null
-  }
+  const activeItem = localItems.find((i) => i._id === activeId) ?? null
 
   function handleDragStart(event: DragStartEvent) {
     setActiveId(String(event.active.id))
@@ -222,7 +214,7 @@ export function KanbanBoard({ items, onStatusChange, onDelete }: KanbanBoardProp
     const activeItemId = String(active.id)
     const overId = String(over.id)
 
-    // Check if over a column id or another card
+    // Check if over a column id directly or another card
     const targetColumn = COLUMNS.find((c) => c.id === overId)
     let newStatus: TrackedJobStatus | null = null
 
@@ -230,7 +222,7 @@ export function KanbanBoard({ items, onStatusChange, onDelete }: KanbanBoardProp
       newStatus = targetColumn.id
     } else {
       // Dragging over another card — find which column that card is in
-      const overItem = currentItems.find((i) => i._id === overId)
+      const overItem = localItems.find((i) => i._id === overId)
       if (overItem) newStatus = overItem.status
     }
 
@@ -248,7 +240,6 @@ export function KanbanBoard({ items, onStatusChange, onDelete }: KanbanBoardProp
     setActiveId(null)
 
     if (!over) {
-      // Revert local state if dropped nowhere
       setLocalItems(items)
       return
     }
@@ -256,14 +247,13 @@ export function KanbanBoard({ items, onStatusChange, onDelete }: KanbanBoardProp
     const activeItemId = String(active.id)
     const overId = String(over.id)
 
-    // Find target column
     const targetColumn = COLUMNS.find((c) => c.id === overId)
     let newStatus: TrackedJobStatus | null = null
 
     if (targetColumn) {
       newStatus = targetColumn.id
     } else {
-      const overItem = currentItems.find((i) => i._id === overId)
+      const overItem = localItems.find((i) => i._id === overId)
       if (overItem) newStatus = overItem.status
     }
 
@@ -273,35 +263,51 @@ export function KanbanBoard({ items, onStatusChange, onDelete }: KanbanBoardProp
     }
 
     const original = items.find((i) => i._id === activeItemId)
-    if (!original || original.status === newStatus) return
+    if (!original) return
 
-    // Commit optimistic update
+    // Apply update to local state
     setLocalItems((prev) =>
       prev.map((item) =>
         item._id === activeItemId ? { ...item, status: newStatus! } : item
       )
     )
 
-    try {
-      await onStatusChange(activeItemId, newStatus)
-    } catch {
-      // Revert on failure
-      setLocalItems(items)
+    if (original.status !== newStatus) {
+      try {
+        await onStatusChange(activeItemId, newStatus)
+      } catch {
+        setLocalItems(items)
+      }
     }
   }
 
-  function handleDelete(id: string) {
+  async function handleDelete(id: string) {
+    // Optimistic remove — save snapshot first so we can roll back on failure,
+    // matching the same pattern handleDragEnd uses for status changes.
+    const snapshot = localItems
     setLocalItems((prev) => prev.filter((i) => i._id !== id))
-    onDelete(id)
+    try {
+      await onDelete(id)
+    } catch {
+      // API call failed — restore the item so the user knows deletion didn't happen
+      setLocalItems(snapshot)
+    }
   }
 
   const columnedItems = (colId: TrackedJobStatus) =>
-    currentItems.filter((i) => i.status === colId)
+    localItems.filter((i) => i.status === colId)
+
+  // Custom collision detection: pointerWithin first, fallback to rectIntersection
+  const customCollisionDetection = (args: any) => {
+    const pointerCollisions = pointerWithin(args)
+    if (pointerCollisions.length > 0) return pointerCollisions
+    return rectIntersection(args)
+  }
 
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={customCollisionDetection}
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}

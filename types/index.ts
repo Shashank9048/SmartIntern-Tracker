@@ -271,7 +271,7 @@ export interface FormErrors {
 
 // Phase 5 â€” Job Matching Feed Types
 
-export type MatchStatus = 'no_resume' | 'computing' | 'ready'
+export type MatchStatus = 'no_resume' | 'not_parsed' | 'no_jobs' | 'computing' | 'ready'
 
 export interface RecommendedJobEntry {
   job_id: string

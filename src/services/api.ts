@@ -63,7 +63,13 @@ const handleApiError = async (response: Response, context: string) => {
   }
 }
 
-const getAuthHeaders = () => {
+const getAuthHeaders = (): Record<string, string> => {
+  // Guard against SSR: localStorage does not exist on the server.
+  // Returning no Authorization header on the server is safe — all
+  // protected routes will simply get a 401 which the caller handles.
+  if (typeof window === 'undefined') {
+    return { 'Content-Type': 'application/json' };
+  }
   const token = localStorage.getItem('access_token');
   return {
     'Content-Type': 'application/json',
@@ -74,6 +80,8 @@ const getAuthHeaders = () => {
 // --- Applications ---
 
 export const getApplications = async (): Promise<any[]> => {
+  // Guard: skip if not in browser
+  if (typeof window === 'undefined') return [];
   const response = await fetch(`${BASE_URL}/api/applications`, { headers: getAuthHeaders() });
   if (!response.ok) throw new Error('Failed to fetch applications');
   return response.json();
@@ -88,7 +96,11 @@ export const getLatestAnalysis = async (): Promise<any> => {
     if (!response.ok) throw new Error('Failed to fetch latest analysis');
     return response.json();
   } catch (error) {
-    console.error('Latest Analysis error:', error);
+    if (error instanceof TypeError || (error instanceof Error && error.message === 'Failed to fetch')) {
+      console.warn('[LatestAnalysis] Backend unreachable — skipping.');
+    } else {
+      console.warn('[LatestAnalysis] Error:', error instanceof Error ? error.message : error);
+    }
     return null;
   }
 };
@@ -161,16 +173,28 @@ export interface UserProfile {
 }
 
 export const getUserProfile = async (): Promise<UserProfile> => {
-  const response = await fetch(`${BASE_URL}/user/me`, {
-    method: 'GET',
-    headers: getAuthHeaders(),
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    console.error('Get Profile failed:', response.status, text.substring(0, 100));
-    throw new Error(`Failed to fetch profile (${response.status})`);
+  // Guard: skip if not in browser (SSR path)
+  if (typeof window === 'undefined') {
+    throw new Error('getUserProfile called on server — skipping');
   }
-  return response.json();
+  try {
+    const response = await fetch(`${BASE_URL}/user/me`, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn('Get Profile failed:', response.status, text.substring(0, 100));
+      throw new Error(`Failed to fetch profile (${response.status})`);
+    }
+    return response.json();
+  } catch (error) {
+    if (error instanceof TypeError && error.message === 'Failed to fetch') {
+      // Network-level failure (backend unreachable) — surface clearly
+      throw new Error('Backend unreachable: cannot connect to http://localhost:8000. Is the server running?');
+    }
+    throw error;
+  }
 };
 
 export const updateUserProfile = async (data: Partial<UserProfile> & { password?: string }): Promise<UserProfile> => {
@@ -207,16 +231,26 @@ export interface DashboardInsights {
   learning_roadmap: string;
 }
 
-export const getDashboardInsights = async (): Promise<DashboardInsights> => {
-  const response = await fetch(`${BASE_URL}/api/insights/dashboard`, {
-    method: 'GET',
-    headers: getAuthHeaders(),
-  });
-  if (!response.ok) {
-    const errorData = await handleApiError(response, 'Dashboard Insights');
-    throw new Error(errorData.detail || 'Failed to fetch insights');
+export const getDashboardInsights = async (): Promise<DashboardInsights | null> => {
+  // Guard: skip if not in browser
+  if (typeof window === 'undefined') return null;
+  try {
+    const response = await fetch(`${BASE_URL}/api/insights/dashboard`, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await handleApiError(response, 'Dashboard Insights');
+      throw new Error(errorData.detail || 'Failed to fetch insights');
+    }
+    return response.json();
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof Error && error.message === 'Failed to fetch')) {
+      console.warn('[DashboardInsights] Backend unreachable — skipping.');
+      return null;
+    }
+    throw error;
   }
-  return response.json();
 };
 
 // --- Resume Analysis ---
@@ -258,6 +292,8 @@ export interface ResumeProfile {
   original_filename: string | null;
   uploaded_at: string | null;
   resume_version: string;
+  /** Set when AI extraction degraded to text fallback — non-null means partial parse */
+  parse_error?: string | null;
 }
 
 /**
@@ -306,7 +342,9 @@ export const chatWithAI = async (message: string): Promise<string> => {
   });
   if (!response.ok) {
     const errorData = await handleApiError(response, 'AI Chat');
-    throw new Error(errorData.detail || 'AI chat failed');
+    // Include HTTP status so the caller can distinguish error types (503 = AI quota, 401 = auth, etc.)
+    const detail = errorData.detail || 'AI chat failed';
+    throw new Error(`${response.status}: ${detail}`);
   }
   const data = await response.json();
   return data.reply as string;
